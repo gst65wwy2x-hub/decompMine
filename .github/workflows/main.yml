@@ -1,8 +1,6 @@
-name: Inject Dylib into IPA
+name: Dump Classes from IPA
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -10,41 +8,45 @@ jobs:
     runs-on: macos-15
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Install Tools
+    - name: Setup class-dump
       run: |
-        brew install dpkg ldid
+        curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
+        chmod +x /usr/local/bin/class-dump
 
-    - name: Compile Dylib
+    - name: Download IPA
       run: |
-        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
-        echo "Dylib compiled!"
+        # Получаем ссылку через API
+        curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases/tags/v1.0" > release.json
+        URL=$(python3 -c "import json,sys; data=json.load(sys.stdin); [print(a['browser_download_url']) for a in data['assets'] if '.ipa' in a['name']]")
+        echo "Downloading: $URL"
+        curl -L -o mcpe.ipa "$URL"
+        ls -la mcpe.ipa
 
-    - name: Download Original IPA
+    - name: Extract and Dump
       run: |
-        curl -L -o original.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
+        unzip -o mcpe.ipa -d out
+        cd out/Payload/*.app
+        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        echo "Binary: $BIN"
+        class-dump "$BIN" > $GITHUB_WORKSPACE/headers.txt 2>&1
+        echo "Total lines: $(wc -l < $GITHUB_WORKSPACE/headers.txt)"
 
-    - name: Inject Dylib into IPA
+    - name: Show key classes
       run: |
-        # Распаковываем
-        unzip original.ipa -d ipa_contents
-        cd ipa_contents/Payload/*.app
-        
-        # Копируем dylib
-        cp $GITHUB_WORKSPACE/MinecraftCheat.dylib .
-        
-        # Вставляем загрузку dylib в бинарник
-        BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
-        install_name_tool -change /usr/lib/libSystem.B.dylib @executable_path/MinecraftCheat.dylib "$BINARY" || true
-        
-        # Пакуем обратно
-        cd $GITHUB_WORKSPACE/ipa_contents
-        zip -r $GITHUB_WORKSPACE/MinecraftCheat.ipa Payload/
+        echo "=== Actor/Player/Mob/Entity ==="
+        grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers.txt | head -50
+        echo ""
+        echo "=== AABB/Hitbox ==="
+        grep -i "getAABB\|getHitbox\|aabb\|boundingBox\|getCollision" headers.txt | head -30
+        echo ""
+        echo "=== Render ==="
+        grep -i "renderEntity\|renderPlayer\|LevelRender\|render" headers.txt | head -30
+        echo ""
+        echo "=== Level/Chunk ==="
+        grep -i "interface.*level\|interface.*chunk\|interface.*block" headers.txt | head -30
 
-    - name: Upload Patched IPA
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: MinecraftCheat-IPA
-        path: MinecraftCheat.ipa
+        name: headers
+        path: headers.txt
