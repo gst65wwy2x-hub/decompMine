@@ -2,6 +2,11 @@ name: Анализ IPA и сборка
 
 on:
   workflow_dispatch:
+    inputs:
+      ipa_url:
+        description: 'Прямая ссылка на IPA файл'
+        required: true
+        default: 'https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa'
 
 jobs:
   build:
@@ -13,15 +18,28 @@ jobs:
 
     - name: Скачиваем и устанавливаем class-dump
       run: |
-        # Правильная прямая ссылка на бинарник
         curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
         chmod +x /usr/local/bin/class-dump
         echo "class-dump установлен!"
-        file /usr/local/bin/class-dump
 
-    - name: Скачиваем IPA из релизов
+    - name: Скачиваем IPA
       run: |
-        wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
+        echo "Скачиваю IPA..."
+        # Пробуем основную ссылку
+        wget -O mcpe.ipa "${{ github.event.inputs.ipa_url }}" || {
+          echo "Не удалось скачать по ссылке, пробую альтернативный формат..."
+          # Пробуем без дефиса в начале имени
+          wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/1.26.20.ipa" || {
+            echo "Пробую ещё вариант..."
+            wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/Minecraft.ipa" || {
+              echo "ВСЕ ПОПЫТКИ НЕ УДАЛИСЬ"
+              echo "Проверь ссылку в релизах!"
+              exit 1
+            }
+          }
+        }
+        echo "IPA скачан!"
+        ls -lh mcpe.ipa
 
     - name: Распаковываем и анализируем IPA
       run: |
@@ -36,14 +54,22 @@ jobs:
         # Ищем бинарник
         BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
         if [ -z "$BINARY" ]; then
-          BINARY=$(ls -lhS | grep -v "\.app\|\.plist\|\.png\|\.storyboardc\|\.nib\|\.car\|\.ttf" | head -2 | tail -1 | awk '{print $NF}')
+          echo "Ищу бинарник по размеру..."
+          BINARY=$(ls -lhS | grep -v "\.app\|\.plist\|\.png\|\.storyboardc\|\.nib\|\.car\|\.ttf\|\.otf\|\.momd\|\.metal" | head -2 | tail -1 | awk '{print $NF}')
         fi
         
         echo "Анализирую бинарник: $BINARY"
         mkdir -p ../../../headers/
-        class-dump "$BINARY" > ../../../headers_raw.txt 2>&1
+        class-dump "$BINARY" > ../../../headers_raw.txt 2>&1 || {
+          echo "class-dump не сработал, пробую dsdump..."
+          curl -L -o /usr/local/bin/dsdump https://github.com/DerekSelander/dsdump/raw/master/dsdump
+          chmod +x /usr/local/bin/dsdump
+          dsdump "$BINARY" --objc > ../../../headers_raw.txt 2>&1
+        }
         echo "=== Анализ завершён ==="
         wc -l ../../../headers_raw.txt
+        echo "Первые 50 строк:"
+        head -50 ../../../headers_raw.txt
 
     - name: Показываем важные классы
       run: |
@@ -54,7 +80,10 @@ jobs:
         grep -i "getAABB\|getHitbox\|aabb" headers_raw.txt | head -20
         echo ""
         echo "=== Методы рендера ==="
-        grep -i "renderEntities\|renderPlayer" headers_raw.txt | head -20
+        grep -i "renderEntities\|renderPlayer\|LevelRenderer" headers_raw.txt | head -20
+        echo ""
+        echo "=== Классы чанков ==="
+        grep -i "interface.*chunk\|interface.*level\|interface.*block" headers_raw.txt | head -20
 
     - name: Upload Headers
       uses: actions/upload-artifact@v4
