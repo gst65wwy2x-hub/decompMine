@@ -15,7 +15,7 @@ jobs:
 
     - name: Compile Dylib
       run: |
-        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
+        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics -framework AVFoundation -framework QuartzCore Tweak.mm -o MinecraftCheat.dylib
 
     - name: Upload Dylib
       uses: actions/upload-artifact@v4
