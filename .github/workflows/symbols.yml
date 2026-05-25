@@ -1,0 +1,23 @@
+name: Find C++ Symbols
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+    - name: Download and analyze
+      run: |
+        curl -L -o mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
+        unzip mcpe.ipa -d out
+        cd out/Payload/*.app
+        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        nm "$BIN" | grep -i "getAABB\|Actor\|Player\|render\|LevelRenderer" | head -50 > $GITHUB_WORKSPACE/symbols.txt
+        wc -l $GITHUB_WORKSPACE/symbols.txt
+        cat $GITHUB_WORKSPACE/symbols.txt
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: symbols
+        path: symbols.txt
