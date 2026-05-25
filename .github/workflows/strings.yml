@@ -1,0 +1,23 @@
+name: Strings Search
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+    - name: Download and extract strings
+      run: |
+        curl -L -o mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
+        unzip mcpe.ipa -d out
+        cd out/Payload/*.app
+        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        strings "$BIN" | grep -iE "getAABB|getHitbox|Actor|Player|renderEntities|LevelRenderer|GameMode|LocalPlayer|getPosition|getName" | sort -u > $GITHUB_WORKSPACE/strings.txt
+        wc -l $GITHUB_WORKSPACE/strings.txt
+        head -100 $GITHUB_WORKSPACE/strings.txt
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: strings-result
+        path: strings.txt
