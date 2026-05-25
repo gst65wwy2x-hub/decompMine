@@ -3,7 +3,6 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
 #import <dlfcn.h>
-#import <objc/runtime.h>
 
 // ========== НАСТРОЙКИ ==========
 static BOOL hitboxEnabled = NO;
@@ -11,7 +10,6 @@ static BOOL freeLookEnabled = NO;
 static BOOL showHatESP = NO;
 static BOOL hitColorEnabled = NO;
 static float hitboxScale = 2.0;
-static float playerAlpha = 1.0;
 static float handX = 0.0, handY = 0.0, handZ = 0.0, handScale = 1.0;
 static int skyboxType = 0;
 static int hitSoundType = 0;
@@ -21,7 +19,6 @@ static AVAudioPlayer *hitSoundPlayer = nil;
 static UILabel *fpsLabel = nil;
 static UILabel *statusLabel = nil;
 static BOOL hooksReady = NO;
-static NSMutableArray *friendsList = nil;
 
 // ========== FPS ==========
 static CADisplayLink *displayLink = nil;
@@ -33,8 +30,6 @@ static float currentFPS = 60.0;
 static void *(*real_getAABB)(void *) = NULL;
 static void *(*real_getPlayers)(void *) = NULL;
 static void *(*real_getPosition)(void *) = NULL;
-static void *(*real_getGameMode)(void *) = NULL;
-static void (*real_queueRenderEntities)(void *, void *) = NULL;
 
 static void *hooked_getAABB(void *self) {
     if (!hitboxEnabled || !real_getAABB) return real_getAABB ? real_getAABB(self) : NULL;
@@ -95,20 +90,12 @@ static void PlayHitSound(int type) {
 }
 
 static void SearchHooks(void) {
-    NSLog(@"[CREEPER] Searching hooks...");
     void *h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
-    
     real_getAABB = dlsym(h, "getAABB");
     real_getPlayers = dlsym(h, "getPlayers");
     real_getPosition = dlsym(h, "getPosition");
-    real_getGameMode = dlsym(h, "getGameMode");
-    
-    if (real_getAABB) { NSLog(@"[CREEPER] ✅ getAABB"); hooksReady = YES; }
-    if (real_getPlayers) NSLog(@"[CREEPER] ✅ getPlayers");
-    if (real_getPosition) NSLog(@"[CREEPER] ✅ getPosition");
-    if (real_getGameMode) NSLog(@"[CREEPER] ✅ getGameMode");
-    
+    if (real_getAABB) hooksReady = YES;
     if (statusLabel) dispatch_async(dispatch_get_main_queue(), ^{
         statusLabel.text = hooksReady ? @"✅ HOOKS" : @"❌ NO HOOKS";
         statusLabel.textColor = hooksReady ? NEON_GREEN : [UIColor redColor];
@@ -124,9 +111,8 @@ static void SearchHooks(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    if (!friendsList) friendsList = [NSMutableArray array];
     
-    float mw = 310, mh = 310;
+    float mw = 310, mh = 280;
     self.view.frame = CGRectMake((UIScreen.mainScreen.bounds.size.width-mw)/2, (UIScreen.mainScreen.bounds.size.height-mh)/2, mw, mh);
     
     UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(0,0,mw,mh)];
