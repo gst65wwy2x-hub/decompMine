@@ -11,10 +11,11 @@ static float hitColorR = 1.0, hitColorG = 0.0, hitColorB = 0.0;
 static float playerAlpha = 1.0;
 static float handX = 0.0, handY = 0.0, handZ = 0.0, handScale = 1.0;
 static int skyboxType = 0;
-static int hitSoundType = 0; // 0-обычный, 1-звон, 2-хлопок, 3-монета
+static int hitSoundType = 0;
 static BOOL menuVisible = NO;
 static UIButton *floatingButton = nil;
 static AVAudioPlayer *hitSoundPlayer = nil;
+static UIView *menuView = nil;
 
 // ========== НЕОНОВЫЕ ЦВЕТА ==========
 #define NEON_GREEN [UIColor colorWithRed:0.22 green:1.0 blue:0.08 alpha:1.0]
@@ -42,16 +43,14 @@ static void AddGlow(UIView *view, UIColor *color, float radius) {
     view.layer.masksToBounds = NO;
 }
 
-// Воспроизвести звук удара
 static void PlayHitSound(int type) {
     NSString *soundName = nil;
     switch (type) {
-        case 1: soundName = @"bell"; break;      // Звон
-        case 2: soundName = @"pop"; break;        // Хлопок
-        case 3: soundName = @"coin"; break;       // Монета
-        default: return;                          // Обычный (не меняем)
+        case 1: soundName = @"bell"; break;
+        case 2: soundName = @"pop"; break;
+        case 3: soundName = @"coin"; break;
+        default: return;
     }
-    
     NSString *path = [NSString stringWithFormat:@"/System/Library/Audio/UISounds/%@.caf", soundName];
     NSURL *url = [NSURL fileURLWithPath:path];
     if (url) {
@@ -60,8 +59,9 @@ static void PlayHitSound(int type) {
     }
 }
 
-// ========== МЕНЮ ==========
+// ========== МЕНЮ С ПРОКРУТКОЙ ==========
 @interface CreeperMenuVC : UIViewController
+@property (nonatomic, strong) UIScrollView *scrollView;
 @end
 
 @implementation CreeperMenuVC
@@ -70,12 +70,10 @@ static void PlayHitSound(int type) {
     [super viewDidLoad];
     
     float menuW = 290;
-    float menuH = 420;
-    float x = (self.view.frame.size.width - menuW) / 2;
-    float y = (self.view.frame.size.height - menuH) / 2;
+    float menuH = 350; // Фиксированная высота с прокруткой
     
-    // Фон с неоновым свечением
-    UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(x, y, menuW, menuH)];
+    // Фон
+    UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(0, 0, menuW, menuH)];
     bg.backgroundColor = DARK_BG;
     bg.layer.cornerRadius = 18;
     bg.layer.borderWidth = 2;
@@ -84,10 +82,15 @@ static void PlayHitSound(int type) {
     [self.view addSubview:bg];
     
     float w = menuW - 30;
-    float cy = 15;
     
-    // ===== HEADER =====
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(15, cy, w, 50)];
+    // ScrollView для контента
+    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 70, menuW, menuH - 70)];
+    self.scrollView.showsVerticalScrollIndicator = YES;
+    self.scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
+    [bg addSubview:self.scrollView];
+    
+    // Header (фиксированный поверх скролла)
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(15, 15, w, 50)];
     header.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.15];
     header.layer.cornerRadius = 12;
     AddGlow(header, NEON_GREEN, 5);
@@ -119,36 +122,32 @@ static void PlayHitSound(int type) {
     AddGlow(fps, NEON_GREEN, 2);
     [header addSubview:fps];
     
-    cy += 60;
+    // Строим контент внутри scrollView
+    float cy = 5;
     
-    // ===== VISUALS =====
-    cy = [self addSectionTitle:@"🎨 VISUALS" y:cy w:w bg:bg];
-    cy = [self addSwitch:@"Free Look (360°)" y:cy w:w bg:bg tag:1];
-    cy = [self addSwitch:@"Hat ESP" y:cy w:w bg:bg tag:2];
-    cy = [self addSwitch:@"Hit Color" y:cy w:w bg:bg tag:3];
+    cy = [self addSectionTitle:@"🎨 VISUALS" y:cy w:w];
+    cy = [self addSwitch:@"Free Look (360°)" y:cy w:w tag:1];
+    cy = [self addSwitch:@"Hat ESP" y:cy w:w tag:2];
+    cy = [self addSwitch:@"Hit Color" y:cy w:w tag:3];
     
-    // ===== SKYBOX =====
-    cy = [self addSectionTitle:@"🌅 SKYBOX" y:cy w:w bg:bg];
-    cy = [self addSegment:@[@"Day", @"Sunset", @"Night", @"Custom"] y:cy w:w bg:bg tag:10];
+    cy = [self addSectionTitle:@"🌅 SKYBOX" y:cy w:w];
+    cy = [self addSegment:@[@"Day", @"Sunset", @"Night", @"Custom"] y:cy w:w tag:10 selected:skyboxType];
     
-    // ===== HIT SOUND =====
-    cy = [self addSectionTitle:@"🔊 HIT SOUND" y:cy w:w bg:bg];
-    cy = [self addSegment:@[@"Default", @"Bell", @"Pop", @"Coin"] y:cy w:w bg:bg tag:20];
+    cy = [self addSectionTitle:@"🔊 HIT SOUND" y:cy w:w];
+    cy = [self addSegment:@[@"Default", @"Bell", @"Pop", @"Coin"] y:cy w:w tag:20 selected:hitSoundType];
     
-    // ===== HAND =====
-    cy = [self addSectionTitle:@"✋ HAND POSITION" y:cy w:w bg:bg];
-    cy = [self addSlider:@"X" y:cy w:w bg:bg tag:100 value:0 min:-2 max:2];
-    cy = [self addSlider:@"Y" y:cy w:w bg:bg tag:101 value:0 min:-2 max:2];
-    cy = [self addSlider:@"Z" y:cy w:w bg:bg tag:102 value:0 min:-2 max:2];
-    cy = [self addSlider:@"Scale" y:cy w:w bg:bg tag:103 value:1 min:0.5 max:3];
+    cy = [self addSectionTitle:@"✋ HAND POSITION" y:cy w:w];
+    cy = [self addSlider:@"X" y:cy w:w tag:100 value:handX min:-2 max:2];
+    cy = [self addSlider:@"Y" y:cy w:w tag:101 value:handY min:-2 max:2];
+    cy = [self addSlider:@"Z" y:cy w:w tag:102 value:handZ min:-2 max:2];
+    cy = [self addSlider:@"Scale" y:cy w:w tag:103 value:handScale min:0.5 max:3];
     
-    // ===== PLAYER =====
-    cy = [self addSectionTitle:@"👤 PLAYER" y:cy w:w bg:bg];
-    cy = [self addSlider:@"Alpha" y:cy w:w bg:bg tag:200 value:1 min:0 max:1];
+    cy = [self addSectionTitle:@"👤 PLAYER" y:cy w:w];
+    cy = [self addSlider:@"Alpha" y:cy w:w tag:200 value:playerAlpha min:0 max:1];
     
-    // ===== CLOSE =====
+    // Кнопка закрытия
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
-    close.frame = CGRectMake(15, cy + 10, w, 38);
+    close.frame = CGRectMake(5, cy + 10, w - 10, 38);
     close.backgroundColor = NEON_GREEN;
     [close setTitle:@"✕ CLOSE" forState:UIControlStateNormal];
     [close setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
@@ -156,26 +155,29 @@ static void PlayHitSound(int type) {
     close.layer.cornerRadius = 10;
     AddGlow(close, NEON_GREEN, 10);
     [close addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
-    [bg addSubview:close];
+    [self.scrollView addSubview:close];
+    cy += 55;
+    
+    self.scrollView.contentSize = CGSizeMake(w, cy);
 }
 
-- (float)addSectionTitle:(NSString *)title y:(float)y w:(float)w bg:(UIView *)bg {
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(18, y, w, 22)];
+- (float)addSectionTitle:(NSString *)title y:(float)y w:(float)w {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(5, y, w, 22)];
     lbl.text = title;
     lbl.textColor = NEON_GREEN;
     lbl.font = [UIFont boldSystemFontOfSize:13];
     AddGlow(lbl, NEON_GREEN, 2);
-    [bg addSubview:lbl];
+    [self.scrollView addSubview:lbl];
     return y + 26;
 }
 
-- (float)addSwitch:(NSString *)name y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(15, y, w, 32)];
+- (float)addSwitch:(NSString *)name y:(float)y w:(float)w tag:(int)tag {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(5, y, w, 32)];
     row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
     row.layer.cornerRadius = 8;
-    [bg addSubview:row];
+    [self.scrollView addSubview:row];
     
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, 180, 20)];
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, 170, 20)];
     lbl.text = name;
     lbl.textColor = [UIColor whiteColor];
     lbl.font = [UIFont systemFontOfSize:13];
@@ -190,11 +192,11 @@ static void PlayHitSound(int type) {
     return y + 36;
 }
 
-- (float)addSlider:(NSString *)name y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag value:(float)val min:(float)min max:(float)max {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(15, y, w, 36)];
+- (float)addSlider:(NSString *)name y:(float)y w:(float)w tag:(int)tag value:(float)val min:(float)min max:(float)max {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(5, y, w, 36)];
     row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
     row.layer.cornerRadius = 8;
-    [bg addSubview:row];
+    [self.scrollView addSubview:row];
     
     UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, 40, 20)];
     lbl.text = name;
@@ -216,16 +218,16 @@ static void PlayHitSound(int type) {
     return y + 40;
 }
 
-- (float)addSegment:(NSArray *)items y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag {
+- (float)addSegment:(NSArray *)items y:(float)y w:(float)w tag:(int)tag selected:(int)sel {
     UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
-    seg.frame = CGRectMake(15, y, w, 32);
-    seg.selectedSegmentIndex = 0;
+    seg.frame = CGRectMake(5, y, w, 32);
+    seg.selectedSegmentIndex = sel;
     seg.tag = tag;
     [seg addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
     if (@available(iOS 13.0, *)) {
         seg.selectedSegmentTintColor = NEON_GREEN;
     }
-    [bg addSubview:seg];
+    [self.scrollView addSubview:seg];
     return y + 38;
 }
 
@@ -251,7 +253,7 @@ static void PlayHitSound(int type) {
     if (seg.tag == 10) skyboxType = (int)seg.selectedSegmentIndex;
     else if (seg.tag == 20) {
         hitSoundType = (int)seg.selectedSegmentIndex;
-        PlayHitSound(hitSoundType); // Демонстрация звука при выборе
+        PlayHitSound(hitSoundType);
     }
 }
 
@@ -261,36 +263,76 @@ static void PlayHitSound(int type) {
         self.view.alpha = 0;
     } completion:^(BOOL f) {
         [self.view removeFromSuperview];
+        menuView = nil;
     }];
 }
 
 @end
 
-// ========== КНОПКА ==========
-@interface Handler : NSObject @end
+// ========== КНОПКА (ПЕРЕМЕЩАЕМАЯ) ==========
+@interface Handler : NSObject
+@property (nonatomic, strong) CreeperMenuVC *menuVC;
+@end
+
 @implementation Handler
+
 - (void)drag:(UIPanGestureRecognizer *)g {
-    UIView *v = g.view; CGPoint t = [g translationInView:v.superview];
+    UIView *v = g.view;
+    CGPoint t = [g translationInView:v.superview];
     if (g.state == UIGestureRecognizerStateChanged) {
         CGPoint c = CGPointMake(v.center.x+t.x, v.center.y+t.y);
         CGRect b = [UIScreen mainScreen].bounds;
-        c.x = MAX(30, MIN(b.size.width-30, c.x)); c.y = MAX(50, MIN(b.size.height-50, c.y));
-        v.center = c; [g setTranslation:CGPointZero inView:v.superview];
+        c.x = MAX(30, MIN(b.size.width-30, c.x));
+        c.y = MAX(50, MIN(b.size.height-50, c.y));
+        v.center = c;
+        
+        // Двигаем меню вместе с кнопкой
+        if (menuView) {
+            menuView.center = c;
+        }
+        
+        [g setTranslation:CGPointZero inView:v.superview];
     }
 }
+
 - (void)tap {
-    if (menuVisible) return;
+    if (menuVisible) {
+        // Закрыть меню
+        [self.menuVC closeMenu];
+        return;
+    }
+    
     menuVisible = YES;
-    CreeperMenuVC *m = [[CreeperMenuVC alloc] init];
-    m.view.frame = [UIScreen mainScreen].bounds;
-    m.view.backgroundColor = [UIColor clearColor];
+    self.menuVC = [[CreeperMenuVC alloc] init];
+    
+    float menuW = 290;
+    float menuH = 350;
+    UIButton *btn = floatingButton;
+    
+    // Позиция меню рядом с кнопкой
+    float mx = btn.center.x - menuW/2;
+    float my = btn.center.y - menuH - 20;
+    
+    // Не даём уйти за экран
+    CGRect screen = [UIScreen mainScreen].bounds;
+    if (mx < 10) mx = 10;
+    if (mx + menuW > screen.size.width - 10) mx = screen.size.width - menuW - 10;
+    if (my < 50) my = btn.center.y + 60;
+    
+    self.menuVC.view.frame = CGRectMake(mx, my, menuW, menuH);
+    self.menuVC.view.backgroundColor = [UIColor clearColor];
+    menuView = self.menuVC.view;
+    
     UIWindow *w = GetKeyWindow();
     if (w) {
-        m.view.alpha = 0;
-        [w addSubview:m.view];
-        [UIView animateWithDuration:0.25 animations:^{ m.view.alpha = 1; }];
+        self.menuVC.view.alpha = 0;
+        [w addSubview:self.menuVC.view];
+        [UIView animateWithDuration:0.25 animations:^{
+            self.menuVC.view.alpha = 1;
+        }];
     }
 }
+
 @end
 
 static Handler *h = nil;
