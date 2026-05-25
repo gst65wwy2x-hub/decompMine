@@ -28,6 +28,26 @@ static float currentFPS = 60.0;
 #define NEON_GREEN [UIColor colorWithRed:0.22 green:1.0 blue:0.08 alpha:1.0]
 #define BLACK_BG [UIColor colorWithRed:0.04 green:0.04 blue:0.04 alpha:0.96]
 
+// ========== FPS ХЭЛПЕР ==========
+@interface FPSHelper : NSObject
+- (void)updateFPS;
+@end
+@implementation FPSHelper
+- (void)updateFPS {
+    if (!lastTime) { lastTime = CACurrentMediaTime(); return; }
+    frameCount++;
+    NSTimeInterval now = CACurrentMediaTime();
+    NSTimeInterval delta = now - lastTime;
+    if (delta >= 0.5) {
+        currentFPS = frameCount / delta;
+        frameCount = 0; lastTime = now;
+        if (fpsLabel) dispatch_async(dispatch_get_main_queue(), ^{
+            fpsLabel.text = [NSString stringWithFormat:@"⚡%.0f", currentFPS];
+        });
+    }
+}
+@end
+
 // ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
     UIWindow *w = nil;
@@ -58,63 +78,23 @@ static void PlayHitSound(int type) {
     if (u) { hitSoundPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:u error:nil]; [hitSoundPlayer play]; }
 }
 
-static void UpdateFPSLabel(void) {
-    if (!lastTime) { lastTime = CACurrentMediaTime(); return; }
-    frameCount++;
-    NSTimeInterval now = CACurrentMediaTime();
-    NSTimeInterval delta = now - lastTime;
-    if (delta >= 0.5) {
-        currentFPS = frameCount / delta;
-        frameCount = 0; lastTime = now;
-        if (fpsLabel) dispatch_async(dispatch_get_main_queue(), ^{
-            fpsLabel.text = [NSString stringWithFormat:@"⚡%.0f", currentFPS];
-        });
-    }
-}
-
-// ========== ПОИСК C++ СИМВОЛОВ ==========
 static void SearchCppSymbols(void) {
     NSLog(@"[CREEPER] Searching C++ symbols...");
-    
-    // Пробуем найти через dlsym
     void *handle = dlopen(NULL, RTLD_NOW);
-    if (!handle) { NSLog(@"[CREEPER] Cannot open main binary"); return; }
+    if (!handle) return;
     
-    // Ищем getAABB
-    void *getAABB_ptr = dlsym(handle, "_ZN5Actor7getAABBEv");
-    if (!getAABB_ptr) getAABB_ptr = dlsym(handle, "_ZNK5Actor7getAABBEv");
-    if (!getAABB_ptr) getAABB_ptr = dlsym(handle, "getAABB");
+    void *ptr = dlsym(handle, "_ZN5Actor7getAABBEv");
+    if (!ptr) ptr = dlsym(handle, "getAABB");
+    if (ptr) { NSLog(@"[CREEPER] ✅ getAABB found"); hooksFound = YES; }
     
-    if (getAABB_ptr) {
-        NSLog(@"[CREEPER] ✅ Found getAABB at %p", getAABB_ptr);
-        hooksFound = YES;
-    }
+    ptr = dlsym(handle, "_ZN19LevelRendererCamera19queueRenderEntitiesE");
+    if (!ptr) ptr = dlsym(handle, "queueRenderEntities");
+    if (ptr) { NSLog(@"[CREEPER] ✅ render found"); hooksFound = YES; }
     
-    // Ищем queueRenderEntities
-    void *render_ptr = dlsym(handle, "_ZN19LevelRendererCamera19queueRenderEntitiesERK36LevelRenderPreRenderUpdateParameters");
-    if (!render_ptr) render_ptr = dlsym(handle, "queueRenderEntities");
-    
-    if (render_ptr) {
-        NSLog(@"[CREEPER] ✅ Found queueRenderEntities at %p", render_ptr);
-        hooksFound = YES;
-    }
-    
-    // Ищем HitboxComponent
-    void *hitbox_ptr = dlsym(handle, "_ZN15HitboxComponent8getHitboxEv");
-    if (!hitbox_ptr) hitbox_ptr = dlsym(handle, "_ZNK15HitboxComponent8getHitboxEv");
-    if (!hitbox_ptr) hitbox_ptr = dlsym(handle, "getHitbox");
-    
-    if (hitbox_ptr) {
-        NSLog(@"[CREEPER] ✅ Found HitboxComponent::getHitbox at %p", hitbox_ptr);
-        hooksFound = YES;
-    }
-    
-    if (!hooksFound) {
-        NSLog(@"[CREEPER] ❌ No C++ symbols found (stripped binary)");
-    }
+    if (!hooksFound) NSLog(@"[CREEPER] ❌ No symbols found");
 }
 
-// ========== МЕНЮ (КОМПАКТНОЕ) ==========
+// ========== МЕНЮ ==========
 @interface CreeperMenuVC : UIViewController
 @property (nonatomic, strong) UIScrollView *sv;
 @property (nonatomic, strong) UILabel *fpsLbl;
@@ -173,7 +153,7 @@ static void SearchCppSymbols(void) {
     
     UIButton *cls = [UIButton buttonWithType:UIButtonTypeCustom];
     cls.frame = CGRectMake(8,cy+6,w-16,34); cls.backgroundColor = NEON_GREEN;
-    [cls setTitle:hooksFound ? @"✕ CLOSE (HOOKS OK)" : @"✕ CLOSE" forState:UIControlStateNormal];
+    [cls setTitle:hooksFound ? @"✕ CLOSE (✓)" : @"✕ CLOSE" forState:UIControlStateNormal];
     [cls setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
     cls.titleLabel.font = [UIFont boldSystemFontOfSize:13]; cls.layer.cornerRadius = 8;
     AddGlow(cls, NEON_GREEN, 8);
@@ -199,15 +179,16 @@ static void SearchCppSymbols(void) {
 @end
 
 static Handler *h = nil;
+static FPSHelper *fpsHelper = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
+    fpsHelper = [[FPSHelper alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Поиск C++ символов через 5 секунд после запуска
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             SearchCppSymbols();
         });
         
-        displayLink = [CADisplayLink displayLinkWithTarget:[[NSObject alloc] init] selector:@selector(UpdateFPSLabel)];
+        displayLink = [CADisplayLink displayLinkWithTarget:fpsHelper selector:@selector(updateFPS)];
         [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
