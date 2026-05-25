@@ -3,11 +3,14 @@
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
 #import <dlfcn.h>
+#import <objc/runtime.h>
 
 // ========== НАСТРОЙКИ ==========
+static BOOL hitboxEnabled = NO;
 static BOOL freeLookEnabled = NO;
 static BOOL showHatESP = NO;
 static BOOL hitColorEnabled = NO;
+static float hitboxScale = 2.0;
 static float playerAlpha = 1.0;
 static float handX = 0.0, handY = 0.0, handZ = 0.0, handScale = 1.0;
 static int skyboxType = 0;
@@ -17,13 +20,32 @@ static UIButton *floatingButton = nil;
 static AVAudioPlayer *hitSoundPlayer = nil;
 static UILabel *fpsLabel = nil;
 static UILabel *statusLabel = nil;
-static BOOL hooksFound = NO;
+static BOOL hooksReady = NO;
+static NSMutableArray *friendsList = nil;
 
 // ========== FPS ==========
 static CADisplayLink *displayLink = nil;
 static NSTimeInterval lastTime = 0;
 static int frameCount = 0;
 static float currentFPS = 60.0;
+
+// ========== ХУКИ ==========
+static void *(*real_getAABB)(void *) = NULL;
+static void *(*real_getPlayers)(void *) = NULL;
+static void *(*real_getPosition)(void *) = NULL;
+static void *(*real_getGameMode)(void *) = NULL;
+static void (*real_queueRenderEntities)(void *, void *) = NULL;
+
+static void *hooked_getAABB(void *self) {
+    if (!hitboxEnabled || !real_getAABB) return real_getAABB ? real_getAABB(self) : NULL;
+    float *box = (float *)real_getAABB(self);
+    if (!box) return NULL;
+    static float nb[6];
+    float cx=(box[0]+box[3])/2, cy=(box[1]+box[4])/2, cz=(box[2]+box[5])/2;
+    float hx=(box[3]-box[0])/2*hitboxScale, hy=(box[4]-box[1])/2*hitboxScale, hz=(box[5]-box[2])/2*hitboxScale;
+    nb[0]=cx-hx; nb[3]=cx+hx; nb[1]=cy-hy; nb[4]=cy+hy; nb[2]=cz-hz; nb[5]=cz+hz;
+    return nb;
+}
 
 // ========== ЦВЕТА ==========
 #define NEON_GREEN [UIColor colorWithRed:0.22 green:1.0 blue:0.08 alpha:1.0]
@@ -72,14 +94,24 @@ static void PlayHitSound(int type) {
     if (u) { hitSoundPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:u error:nil]; [hitSoundPlayer play]; }
 }
 
-static void SearchCppSymbols(void) {
+static void SearchHooks(void) {
+    NSLog(@"[CREEPER] Searching hooks...");
     void *h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
-    if (dlsym(h, "getAABB") || dlsym(h, "_ZN5Actor7getAABBEv")) hooksFound = YES;
-    if (dlsym(h, "queueRenderEntities") || dlsym(h, "_ZN19LevelRendererCamera19queueRenderEntitiesE")) hooksFound = YES;
-    if (dlsym(h, "getHitbox") || dlsym(h, "_ZN15HitboxComponent8getHitboxEv")) hooksFound = YES;
+    
+    real_getAABB = dlsym(h, "getAABB");
+    real_getPlayers = dlsym(h, "getPlayers");
+    real_getPosition = dlsym(h, "getPosition");
+    real_getGameMode = dlsym(h, "getGameMode");
+    
+    if (real_getAABB) { NSLog(@"[CREEPER] ✅ getAABB"); hooksReady = YES; }
+    if (real_getPlayers) NSLog(@"[CREEPER] ✅ getPlayers");
+    if (real_getPosition) NSLog(@"[CREEPER] ✅ getPosition");
+    if (real_getGameMode) NSLog(@"[CREEPER] ✅ getGameMode");
+    
     if (statusLabel) dispatch_async(dispatch_get_main_queue(), ^{
-        statusLabel.text = hooksFound ? @"✅ HOOKS" : @"❌ NO HOOKS";
+        statusLabel.text = hooksReady ? @"✅ HOOKS" : @"❌ NO HOOKS";
+        statusLabel.textColor = hooksReady ? NEON_GREEN : [UIColor redColor];
     });
 }
 
@@ -92,8 +124,9 @@ static void SearchCppSymbols(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    if (!friendsList) friendsList = [NSMutableArray array];
     
-    float mw = 310, mh = 290;
+    float mw = 310, mh = 310;
     self.view.frame = CGRectMake((UIScreen.mainScreen.bounds.size.width-mw)/2, (UIScreen.mainScreen.bounds.size.height-mh)/2, mw, mh);
     
     UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(0,0,mw,mh)];
@@ -103,7 +136,6 @@ static void SearchCppSymbols(void) {
     
     float w = mw - 24;
     
-    // Header
     UIView *hdr = [[UIView alloc] initWithFrame:CGRectMake(12,10,w,44)];
     hdr.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.12]; hdr.layer.cornerRadius = 10;
     AddGlow(hdr, NEON_GREEN, 4); [bg addSubview:hdr];
@@ -111,16 +143,14 @@ static void SearchCppSymbols(void) {
     UILabel *ico = [[UILabel alloc] initWithFrame:CGRectMake(8,7,30,30)];
     ico.text = @"☠️"; ico.font = [UIFont systemFontOfSize:22]; [hdr addSubview:ico];
     
-    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(40,4,w-120,20)];
+    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(40,4,w-110,20)];
     ttl.text = @"CREEPER VISUAL"; ttl.textColor = NEON_GREEN;
     ttl.font = [UIFont boldSystemFontOfSize:15]; [hdr addSubview:ttl];
     
-    // Статус хуков
-    statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(40,26,100,14)];
-    statusLabel.text = @"⏳ SEARCHING..."; statusLabel.textColor = [UIColor whiteColor];
+    statusLabel = [[UILabel alloc] initWithFrame:CGRectMake(40,26,90,14)];
+    statusLabel.text = @"INJECTED"; statusLabel.textColor = NEON_GREEN;
     statusLabel.font = [UIFont systemFontOfSize:9]; [hdr addSubview:statusLabel];
     
-    // FPS
     UILabel *fps = [[UILabel alloc] initWithFrame:CGRectMake(w-70,8,60,24)];
     fps.text = @"⚡60"; fps.textColor = NEON_GREEN;
     fps.font = [UIFont boldSystemFontOfSize:13]; fps.textAlignment = NSTextAlignmentRight;
@@ -129,20 +159,22 @@ static void SearchCppSymbols(void) {
     self.sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0,60,mw,mh-60)]; [bg addSubview:self.sv];
     
     float cy = 4;
+    cy = [self sec:@"🎯 HITBOX" y:cy w:w];
+    cy = [self sw:@"Enabled" y:cy w:w tag:10];
+    cy = [self sl:@"Scale" y:cy w:w tag:100 v:hitboxScale min:0.5 max:5];
     cy = [self sec:@"🎨 VISUALS" y:cy w:w];
-    cy = [self sw:@"Free Look" y:cy w:w tag:1]; cy = [self sw:@"Hat ESP" y:cy w:w tag:2];
+    cy = [self sw:@"Free Look" y:cy w:w tag:1];
+    cy = [self sw:@"Hat ESP" y:cy w:w tag:2];
     cy = [self sw:@"Hit Color" y:cy w:w tag:3];
     cy = [self sec:@"🌅 SKYBOX" y:cy w:w];
-    cy = [self seg:@[@"Day",@"Sunset",@"Night",@"Custom"] y:cy w:w tag:10 sel:skyboxType];
+    cy = [self seg:@[@"Day",@"Sunset",@"Night",@"Custom"] y:cy w:w tag:30 sel:skyboxType];
     cy = [self sec:@"🔊 HIT SOUND" y:cy w:w];
-    cy = [self seg:@[@"Def",@"Bell",@"Pop",@"Coin"] y:cy w:w tag:20 sel:hitSoundType];
+    cy = [self seg:@[@"Def",@"Bell",@"Pop",@"Coin"] y:cy w:w tag:40 sel:hitSoundType];
     cy = [self sec:@"✋ HAND" y:cy w:w];
-    cy = [self sl:@"X" y:cy w:w tag:100 v:handX min:-2 max:2];
-    cy = [self sl:@"Y" y:cy w:w tag:101 v:handY min:-2 max:2];
-    cy = [self sl:@"Z" y:cy w:w tag:102 v:handZ min:-2 max:2];
-    cy = [self sl:@"Scl" y:cy w:w tag:103 v:handScale min:0.5 max:3];
-    cy = [self sec:@"👤 PLAYER" y:cy w:w];
-    cy = [self sl:@"Alpha" y:cy w:w tag:200 v:playerAlpha min:0 max:1];
+    cy = [self sl:@"X" y:cy w:w tag:101 v:handX min:-2 max:2];
+    cy = [self sl:@"Y" y:cy w:w tag:102 v:handY min:-2 max:2];
+    cy = [self sl:@"Z" y:cy w:w tag:103 v:handZ min:-2 max:2];
+    cy = [self sl:@"Scl" y:cy w:w tag:104 v:handScale min:0.5 max:3];
     
     UIButton *cls = [UIButton buttonWithType:UIButtonTypeCustom];
     cls.frame = CGRectMake(8,cy+6,w-16,34); cls.backgroundColor = NEON_GREEN;
@@ -156,15 +188,14 @@ static void SearchCppSymbols(void) {
 
 - (float)sec:(NSString *)t y:(float)y w:(float)w { UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(4,y,w,20)]; l.text=t; l.textColor=NEON_GREEN; l.font=[UIFont boldSystemFontOfSize:12]; [self.sv addSubview:l]; return y+22; }
 - (float)sw:(NSString *)n y:(float)y w:(float)w tag:(int)tag { UIView *r = [[UIView alloc] initWithFrame:CGRectMake(4,y,w,28)]; r.backgroundColor=[NEON_GREEN colorWithAlphaComponent:0.04]; r.layer.cornerRadius=6; [self.sv addSubview:r]; UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8,4,180,20)]; l.text=n; l.textColor=[UIColor whiteColor]; l.font=[UIFont systemFontOfSize:12]; [r addSubview:l]; UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(w-50,0,42,28)]; sw.onTintColor=NEON_GREEN; sw.tag=tag; [sw addTarget:self action:@selector(swCh:) forControlEvents:UIControlEventValueChanged]; [r addSubview:sw]; return y+32; }
-- (float)sl:(NSString *)n y:(float)y w:(float)w tag:(int)tag v:(float)v min:(float)mn max:(float)mx { UIView *r = [[UIView alloc] initWithFrame:CGRectMake(4,y,w,30)]; r.backgroundColor=[NEON_GREEN colorWithAlphaComponent:0.04]; r.layer.cornerRadius=6; [self.sv addSubview:r]; UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8,6,30,18)]; l.text=n; l.textColor=NEON_GREEN; l.font=[UIFont boldSystemFontOfSize:10]; [r addSubview:l]; UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(40,4,w-52,22)]; sl.minimumValue=mn; sl.maximumValue=mx; sl.value=v; sl.minimumTrackTintColor=NEON_GREEN; sl.thumbTintColor=NEON_GREEN; sl.tag=tag; [sl addTarget:self action:@selector(slCh:) forControlEvents:UIControlEventValueChanged]; [r addSubview:sl]; return y+34; }
+- (float)sl:(NSString *)n y:(float)y w:(float)w tag:(int)tag v:(float)v min:(float)mn max:(float)mx { UIView *r = [[UIView alloc] initWithFrame:CGRectMake(4,y,w,30)]; r.backgroundColor=[NEON_GREEN colorWithAlphaComponent:0.04]; r.layer.cornerRadius=6; [self.sv addSubview:r]; UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8,6,35,18)]; l.text=n; l.textColor=NEON_GREEN; l.font=[UIFont boldSystemFontOfSize:10]; [r addSubview:l]; UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(45,4,w-57,22)]; sl.minimumValue=mn; sl.maximumValue=mx; sl.value=v; sl.minimumTrackTintColor=NEON_GREEN; sl.thumbTintColor=NEON_GREEN; sl.tag=tag; [sl addTarget:self action:@selector(slCh:) forControlEvents:UIControlEventValueChanged]; [r addSubview:sl]; return y+34; }
 - (float)seg:(NSArray *)it y:(float)y w:(float)w tag:(int)tag sel:(int)sel { UISegmentedControl *sg = [[UISegmentedControl alloc] initWithItems:it]; sg.frame=CGRectMake(4,y,w,28); sg.selectedSegmentIndex=sel; sg.tag=tag; [sg addTarget:self action:@selector(sgCh:) forControlEvents:UIControlEventValueChanged]; if (@available(iOS 13.0, *)) sg.selectedSegmentTintColor=NEON_GREEN; [self.sv addSubview:sg]; return y+32; }
-- (void)swCh:(UISwitch *)s { if (s.tag==1) freeLookEnabled=s.isOn; else if (s.tag==2) showHatESP=s.isOn; else if (s.tag==3) hitColorEnabled=s.isOn; }
-- (void)slCh:(UISlider *)s { if (s.tag==100) handX=s.value; else if (s.tag==101) handY=s.value; else if (s.tag==102) handZ=s.value; else if (s.tag==103) handScale=s.value; else if (s.tag==200) playerAlpha=s.value; }
-- (void)sgCh:(UISegmentedControl *)s { if (s.tag==10) skyboxType=(int)s.selectedSegmentIndex; else if (s.tag==20) { hitSoundType=(int)s.selectedSegmentIndex; PlayHitSound(hitSoundType); } }
+- (void)swCh:(UISwitch *)s { if (s.tag==10) hitboxEnabled=s.isOn; else if (s.tag==1) freeLookEnabled=s.isOn; else if (s.tag==2) showHatESP=s.isOn; else if (s.tag==3) hitColorEnabled=s.isOn; }
+- (void)slCh:(UISlider *)s { if (s.tag==100) hitboxScale=s.value; else if (s.tag==101) handX=s.value; else if (s.tag==102) handY=s.value; else if (s.tag==103) handZ=s.value; else if (s.tag==104) handScale=s.value; }
+- (void)sgCh:(UISegmentedControl *)s { if (s.tag==30) skyboxType=(int)s.selectedSegmentIndex; else if (s.tag==40) { hitSoundType=(int)s.selectedSegmentIndex; PlayHitSound(hitSoundType); } }
 - (void)closeMenu { menuVisible=NO; [UIView animateWithDuration:0.15 animations:^{ self.view.alpha=0; } completion:^(BOOL f){ [self.view removeFromSuperview]; }]; }
 @end
 
-// ========== КНОПКА ==========
 @interface Handler : NSObject @end
 @implementation Handler
 - (void)drag:(UIPanGestureRecognizer *)g { UIView *v=g.view; CGPoint t=[g translationInView:v.superview]; if (g.state==UIGestureRecognizerStateChanged) { CGPoint c=CGPointMake(v.center.x+t.x,v.center.y+t.y); CGRect b=[UIScreen mainScreen].bounds; c.x=MAX(30,MIN(b.size.width-30,c.x)); c.y=MAX(50,MIN(b.size.height-50,c.y)); v.center=c; [g setTranslation:CGPointZero inView:v.superview]; } }
@@ -176,7 +207,7 @@ static FPSHelper *fph = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init]; fph = [[FPSHelper alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ SearchCppSymbols(); });
+        SearchHooks();
         displayLink = [CADisplayLink displayLinkWithTarget:fph selector:@selector(tick)];
         [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
