@@ -1,6 +1,8 @@
-name: Анализ IPA и сборка
+name: Build Dylib
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -11,105 +13,12 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Скачиваем и устанавливаем class-dump
+    - name: Compile Dylib
       run: |
-        curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
-        chmod +x /usr/local/bin/class-dump
-        echo "class-dump установлен!"
+        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
 
-    - name: Получаем список файлов в релизе
-      run: |
-        echo "=== Получаем информацию о релизе ==="
-        curl -L -H "Accept: application/json" \
-          "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases/tags/v1.0" \
-          -o release_info.json
-        
-        echo "=== Файлы в релизе ==="
-        python3 -c "
-import json
-with open('release_info.json') as f:
-    data = json.load(f)
-    for asset in data.get('assets', []):
-        print(f'Имя: {asset[\"name\"]}')
-        print(f'URL: {asset[\"browser_download_url\"]}')
-        print('---')
-        "
-
-    - name: Скачиваем IPA (авто-поиск)
-      run: |
-        echo "Пробую скачать IPA..."
-        
-        # Получаем прямую ссылку из JSON
-        DOWNLOAD_URL=$(python3 -c "
-import json
-with open('release_info.json') as f:
-    data = json.load(f)
-    for asset in data.get('assets', []):
-        if '.ipa' in asset['name'].lower():
-            print(asset['browser_download_url'])
-            break
-        ")
-        
-        if [ -z "$DOWNLOAD_URL" ]; then
-          echo "IPA не найден в релизе!"
-          echo "Доступные файлы:"
-          python3 -c "
-import json
-with open('release_info.json') as f:
-    data = json.load(f)
-    for asset in data.get('assets', []):
-        print(f'  - {asset[\"name\"]}')
-          "
-          exit 1
-        fi
-        
-        echo "Найден IPA: $DOWNLOAD_URL"
-        wget -O mcpe.ipa "$DOWNLOAD_URL" || exit 1
-        echo "IPA скачан!"
-        ls -lh mcpe.ipa
-
-    - name: Распаковываем и анализируем IPA
-      run: |
-        echo "=== Начинаем анализ ==="
-        unzip -o mcpe.ipa -d extracted
-        cd extracted/Payload/
-        
-        APP_NAME=$(ls | grep ".app")
-        echo "Найдено приложение: $APP_NAME"
-        cd "$APP_NAME"
-        
-        BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
-        if [ -z "$BINARY" ]; then
-          BINARY=$(ls -lhS | grep -v "\.app\|\.plist\|\.png\|\.storyboardc\|\.nib\|\.car\|\.ttf\|\.otf\|\.momd\|\.metal" | head -2 | tail -1 | awk '{print $NF}')
-        fi
-        
-        echo "Анализирую бинарник: $BINARY"
-        mkdir -p ../../../headers/
-        class-dump "$BINARY" > ../../../headers_raw.txt 2>&1
-        echo "=== Анализ завершён ==="
-        echo "Строк в дампе:"
-        wc -l ../../../headers_raw.txt
-        echo ""
-        echo "=== Первые 100 строк ==="
-        head -100 ../../../headers_raw.txt
-
-    - name: Показываем важные классы
-      run: |
-        echo "=== Классы Actor/Player/Mob ==="
-        grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers_raw.txt | head -40
-        echo ""
-        echo "=== Методы AABB/хитбокс ==="
-        grep -i "getAABB\|getHitbox\|getBoundingBox\|aabb" headers_raw.txt | head -20
-        echo ""
-        echo "=== Методы рендера ==="
-        grep -i "renderEntities\|renderPlayer\|LevelRenderer" headers_raw.txt | head -20
-        echo ""
-        echo "=== Классы Level/Chunk/Block ==="
-        grep -i "interface.*level\|interface.*chunk\|interface.*block\|interface.*world" headers_raw.txt | head -30
-
-    - name: Upload Headers
+    - name: Upload Dylib
       uses: actions/upload-artifact@v4
       with:
-        name: Minecraft-Headers
-        path: |
-          headers_raw.txt
+        name: MinecraftCheat-Dylib
+        path: MinecraftCheat.dylib
