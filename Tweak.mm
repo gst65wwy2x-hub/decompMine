@@ -1,13 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
 
 static UIButton *floatingButton = nil;
 static BOOL menuVisible = NO;
-static BOOL hitboxesEnabled = NO;
-static float hitboxScale = 1.0;
 static NSMutableArray *friendsList = nil;
-static IMP orig_getAABB = NULL;
 
 static UIWindow *GetKeyWindow(void) {
     UIWindow *w = nil;
@@ -20,44 +16,6 @@ static UIWindow *GetKeyWindow(void) {
     }
     if (!w) w = [UIApplication sharedApplication].keyWindow;
     return w;
-}
-
-static void *hooked_getAABB(id self, SEL _cmd) {
-    typedef void *(*F)(id, SEL);
-    F orig = (F)orig_getAABB;
-    if (!hitboxesEnabled || !orig) return orig(self, _cmd);
-    
-    NSString *name = nil;
-    if ([self respondsToSelector:NSSelectorFromString(@"getName")])
-        name = [self performSelector:NSSelectorFromString(@"getName")];
-    if (name && [friendsList containsObject:name]) return orig(self, _cmd);
-    
-    float *box = (float *)orig(self, _cmd);
-    if (!box) return NULL;
-    
-    float cx = (box[0]+box[3])/2, cy = (box[1]+box[4])/2, cz = (box[2]+box[5])/2;
-    float hx = (box[3]-box[0])/2*hitboxScale, hy = (box[4]-box[1])/2*hitboxScale, hz = (box[5]-box[2])/2*hitboxScale;
-    box[0]=cx-hx; box[3]=cx+hx; box[1]=cy-hy; box[4]=cy+hy; box[2]=cz-hz; box[5]=cz+hz;
-    return box;
-}
-
-static void InstallHooks(void) {
-    NSArray *classes = @[@"Actor", @"Entity", @"Mob", @"Player", @"ServerPlayer", @"LocalPlayer"];
-    NSArray *methods = @[@"getAABB", @"getBoundingBox", @"getHitbox", @"aabb", @"getCollisionBox"];
-    
-    for (NSString *c in classes) {
-        for (NSString *m in methods) {
-            Class cls = NSClassFromString(c);
-            if (!cls) continue;
-            SEL sel = NSSelectorFromString(m);
-            Method meth = class_getInstanceMethod(cls, sel);
-            if (!meth) meth = class_getClassMethod(cls, sel);
-            if (!meth) continue;
-            orig_getAABB = method_getImplementation(meth);
-            method_setImplementation(meth, (IMP)hooked_getAABB);
-            return;
-        }
-    }
 }
 
 @interface MenuVC : UIViewController <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
@@ -86,17 +44,10 @@ static void InstallHooks(void) {
     
     UIButton *hb = [UIButton buttonWithType:UIButtonTypeCustom];
     hb.frame = CGRectMake(12, y, w, 32);
-    hb.backgroundColor = hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor];
-    [hb setTitle:hitboxesEnabled ? @"Hitboxes: ON" : @"Hitboxes: OFF" forState:UIControlStateNormal];
+    hb.backgroundColor = [UIColor darkGrayColor];
+    [hb setTitle:@"Hitboxes: OFF" forState:UIControlStateNormal];
     hb.titleLabel.font = [UIFont boldSystemFontOfSize:12]; hb.layer.cornerRadius = 5;
-    [hb addTarget:self action:@selector(tgl) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:hb]; y += 36;
-    
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
-    sl.minimumValue = 0.5; sl.maximumValue = 5.0; sl.value = hitboxScale;
-    sl.minimumTrackTintColor = [UIColor greenColor];
-    [sl addTarget:self action:@selector(sc:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:sl]; y += 30;
+    [self.view addSubview:hb]; y += 40;
     
     self.tf = [[UITextField alloc] initWithFrame:CGRectMake(12, y, w-52, 28)];
     self.tf.placeholder = @"Ник друга"; self.tf.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1];
@@ -123,8 +74,6 @@ static void InstallHooks(void) {
     [self.view addSubview:close];
 }
 
-- (void)tgl { hitboxesEnabled = !hitboxesEnabled; [self dismissViewControllerAnimated:NO completion:nil]; menuVisible = NO; }
-- (void)sc:(UISlider *)s { hitboxScale = s.value; }
 - (void)addF { NSString *n = [self.tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; if (n.length && ![friendsList containsObject:n]) { [friendsList addObject:n]; [self.tv reloadData]; self.tf.text = @""; [self.tf resignFirstResponder]; } }
 - (void)closeM { menuVisible = NO; [self dismissViewControllerAnimated:YES completion:nil]; }
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [self addF]; return YES; }
@@ -134,9 +83,6 @@ static void InstallHooks(void) {
     if (!c) { c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"]; c.backgroundColor = [UIColor clearColor]; c.textLabel.textColor = [UIColor cyanColor]; c.textLabel.font = [UIFont systemFontOfSize:12]; }
     if (ip.row < friendsList.count) { id o = friendsList[ip.row]; c.textLabel.text = [o isKindOfClass:[NSString class]] ? o : [NSString stringWithFormat:@"%@", o]; }
     return c;
-}
-- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)es forRowAtIndexPath:(NSIndexPath *)ip {
-    if (es == UITableViewCellEditingStyleDelete && ip.row < friendsList.count) { [friendsList removeObjectAtIndex:ip.row]; [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade]; }
 }
 @end
 
@@ -153,7 +99,7 @@ static void InstallHooks(void) {
 }
 - (void)tap {
     if (menuVisible) return; menuVisible = YES;
-    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 260, 300);
+    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 260, 250);
     m.modalPresentationStyle = UIModalPresentationFormSheet;
     UIWindow *w = GetKeyWindow(); if (w && w.rootViewController) [w.rootViewController presentViewController:m animated:YES completion:nil];
 }
@@ -163,7 +109,6 @@ static Handler *h = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{ InstallHooks(); });
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingButton.frame = CGRectMake(50, 200, 50, 50); floatingButton.layer.cornerRadius = 25;
         floatingButton.clipsToBounds = YES;
