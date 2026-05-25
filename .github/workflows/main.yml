@@ -13,11 +13,36 @@ jobs:
         curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
         chmod +x /usr/local/bin/class-dump
 
+    - name: List releases
+      run: |
+        echo "=== Все релизы ==="
+        curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for r in data:
+    print(f'Tag: {r[\"tag_name\"]}')
+    for a in r['assets']:
+        print(f'  File: {a[\"name\"]}  URL: {a[\"browser_download_url\"]}')
+"
+
     - name: Download IPA
       run: |
-        # Получаем ссылку через API
-        curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases/tags/v1.0" > release.json
-        URL=$(python3 -c "import json,sys; data=json.load(sys.stdin); [print(a['browser_download_url']) for a in data['assets'] if '.ipa' in a['name']]")
+        # Пробуем получить URL первого IPA из последнего релиза
+        URL=$(curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for r in data:
+    for a in r['assets']:
+        if '.ipa' in a['name']:
+            print(a['browser_download_url'])
+            sys.exit(0)
+")
+        
+        if [ -z "$URL" ]; then
+          echo "IPA не найден!"
+          exit 1
+        fi
+        
         echo "Downloading: $URL"
         curl -L -o mcpe.ipa "$URL"
         ls -la mcpe.ipa
@@ -29,7 +54,7 @@ jobs:
         BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
         echo "Binary: $BIN"
         class-dump "$BIN" > $GITHUB_WORKSPACE/headers.txt 2>&1
-        echo "Total lines: $(wc -l < $GITHUB_WORKSPACE/headers.txt)"
+        echo "Lines: $(wc -l < $GITHUB_WORKSPACE/headers.txt)"
 
     - name: Show key classes
       run: |
@@ -37,13 +62,10 @@ jobs:
         grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers.txt | head -50
         echo ""
         echo "=== AABB/Hitbox ==="
-        grep -i "getAABB\|getHitbox\|aabb\|boundingBox\|getCollision" headers.txt | head -30
+        grep -i "getAABB\|getHitbox\|aabb\|boundingBox" headers.txt | head -30
         echo ""
         echo "=== Render ==="
-        grep -i "renderEntity\|renderPlayer\|LevelRender\|render" headers.txt | head -30
-        echo ""
-        echo "=== Level/Chunk ==="
-        grep -i "interface.*level\|interface.*chunk\|interface.*block" headers.txt | head -30
+        grep -i "renderEntity\|renderPlayer\|LevelRender" headers.txt | head -30
 
     - name: Upload
       uses: actions/upload-artifact@v4
