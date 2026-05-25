@@ -11,46 +11,23 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install optool
-      run: |
-        curl -L -o /usr/local/bin/optool https://github.com/alexzielenski/optool/releases/download/0.1/optool
-        chmod +x /usr/local/bin/optool
-
     - name: Compile Dylib
       run: |
         clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics -framework AVFoundation -framework QuartzCore Tweak.mm -o MinecraftCheat.dylib
-        echo "Dylib compiled!"
 
     - name: Download IPA
       run: |
         curl -L -o mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
-        ls -la mcpe.ipa
 
-    - name: Inject Dylib into IPA
+    - name: Inject Dylib
       run: |
-        # Распаковка
-        unzip -o mcpe.ipa -d extracted
+        unzip mcpe.ipa -d extracted
+        cp MinecraftCheat.dylib extracted/Payload/*.app/
         cd extracted/Payload/*.app
-        
-        # Копируем dylib
-        cp $GITHUB_WORKSPACE/MinecraftCheat.dylib .
-        
-        # Находим бинарник
         BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
-        echo "Patching: $BINARY"
-        
-        # Вставляем dylib через optool
-        optool install -c load -p "@executable_path/MinecraftCheat.dylib" -t "$BINARY" || {
-          echo "optool failed, trying alternative..."
-          # Альтернатива - меняем LC_LOAD_DYLIB
-          install_name_tool -add_rpath @executable_path "$BINARY" 2>/dev/null || true
-        }
-        
-        # Пакуем обратно
-        cd $GITHUB_WORKSPACE/extracted
-        zip -r $GITHUB_WORKSPACE/MinecraftPatched.ipa Payload/
-        
-        echo "Done!"
+        install_name_tool -add_rpath @executable_path "$BINARY" 2>/dev/null || true
+        cd ../../..
+        zip -r MinecraftPatched.ipa Payload/
 
     - name: Upload Patched IPA
       uses: actions/upload-artifact@v4
