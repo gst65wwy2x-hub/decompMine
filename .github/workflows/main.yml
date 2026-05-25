@@ -2,11 +2,6 @@ name: Анализ IPA и сборка
 
 on:
   workflow_dispatch:
-    inputs:
-      ipa_url:
-        description: 'Прямая ссылка на IPA файл'
-        required: true
-        default: 'https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa'
 
 jobs:
   build:
@@ -25,18 +20,9 @@ jobs:
     - name: Скачиваем IPA
       run: |
         echo "Скачиваю IPA..."
-        # Пробуем основную ссылку
-        wget -O mcpe.ipa "${{ github.event.inputs.ipa_url }}" || {
-          echo "Не удалось скачать по ссылке, пробую альтернативный формат..."
-          # Пробуем без дефиса в начале имени
-          wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/1.26.20.ipa" || {
-            echo "Пробую ещё вариант..."
-            wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/Minecraft.ipa" || {
-              echo "ВСЕ ПОПЫТКИ НЕ УДАЛИСЬ"
-              echo "Проверь ссылку в релизах!"
-              exit 1
-            }
-          }
+        wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa" || {
+          echo "Ошибка скачивания!"
+          exit 1
         }
         echo "IPA скачан!"
         ls -lh mcpe.ipa
@@ -51,10 +37,8 @@ jobs:
         echo "Найдено приложение: $APP_NAME"
         cd "$APP_NAME"
         
-        # Ищем бинарник
         BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
         if [ -z "$BINARY" ]; then
-          echo "Ищу бинарник по размеру..."
           BINARY=$(ls -lhS | grep -v "\.app\|\.plist\|\.png\|\.storyboardc\|\.nib\|\.car\|\.ttf\|\.otf\|\.momd\|\.metal" | head -2 | tail -1 | awk '{print $NF}')
         fi
         
@@ -67,23 +51,28 @@ jobs:
           dsdump "$BINARY" --objc > ../../../headers_raw.txt 2>&1
         }
         echo "=== Анализ завершён ==="
+        echo "Строк в дампе:"
         wc -l ../../../headers_raw.txt
-        echo "Первые 50 строк:"
-        head -50 ../../../headers_raw.txt
+        echo ""
+        echo "=== Первые 100 строк ==="
+        head -100 ../../../headers_raw.txt
 
     - name: Показываем важные классы
       run: |
-        echo "=== Классы Actor/Player ==="
-        grep -i "interface.*actor\|interface.*player" headers_raw.txt | head -30
+        echo "=== Классы Actor/Player/Mob ==="
+        grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers_raw.txt | head -40
         echo ""
-        echo "=== Методы AABB ==="
-        grep -i "getAABB\|getHitbox\|aabb" headers_raw.txt | head -20
+        echo "=== Методы AABB/хитбокс ==="
+        grep -i "getAABB\|getHitbox\|getBoundingBox\|aabb" headers_raw.txt | head -20
         echo ""
         echo "=== Методы рендера ==="
         grep -i "renderEntities\|renderPlayer\|LevelRenderer" headers_raw.txt | head -20
         echo ""
-        echo "=== Классы чанков ==="
-        grep -i "interface.*chunk\|interface.*level\|interface.*block" headers_raw.txt | head -20
+        echo "=== Классы Level/Chunk/Block ==="
+        grep -i "interface.*level\|interface.*chunk\|interface.*block\|interface.*world" headers_raw.txt | head -30
+        echo ""
+        echo "=== Классы Minecraft ==="
+        grep -i "interface.*minecraft\|interface.*mcpe\|interface.*bedrock" headers_raw.txt | head -20
 
     - name: Upload Headers
       uses: actions/upload-artifact@v4
