@@ -1,6 +1,8 @@
-name: Dump Classes from IPA
+name: Build Dylib
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -8,67 +10,15 @@ jobs:
     runs-on: macos-15
 
     steps:
-    - name: Setup class-dump
-      run: |
-        curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
-        chmod +x /usr/local/bin/class-dump
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-    - name: List releases
+    - name: Compile Dylib
       run: |
-        echo "=== Все релизы ==="
-        curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for r in data:
-    print(f'Tag: {r[\"tag_name\"]}')
-    for a in r['assets']:
-        print(f'  File: {a[\"name\"]}  URL: {a[\"browser_download_url\"]}')
-"
+        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
 
-    - name: Download IPA
-      run: |
-        # Пробуем получить URL первого IPA из последнего релиза
-        URL=$(curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for r in data:
-    for a in r['assets']:
-        if '.ipa' in a['name']:
-            print(a['browser_download_url'])
-            sys.exit(0)
-")
-        
-        if [ -z "$URL" ]; then
-          echo "IPA не найден!"
-          exit 1
-        fi
-        
-        echo "Downloading: $URL"
-        curl -L -o mcpe.ipa "$URL"
-        ls -la mcpe.ipa
-
-    - name: Extract and Dump
-      run: |
-        unzip -o mcpe.ipa -d out
-        cd out/Payload/*.app
-        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
-        echo "Binary: $BIN"
-        class-dump "$BIN" > $GITHUB_WORKSPACE/headers.txt 2>&1
-        echo "Lines: $(wc -l < $GITHUB_WORKSPACE/headers.txt)"
-
-    - name: Show key classes
-      run: |
-        echo "=== Actor/Player/Mob/Entity ==="
-        grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers.txt | head -50
-        echo ""
-        echo "=== AABB/Hitbox ==="
-        grep -i "getAABB\|getHitbox\|aabb\|boundingBox" headers.txt | head -30
-        echo ""
-        echo "=== Render ==="
-        grep -i "renderEntity\|renderPlayer\|LevelRender" headers.txt | head -30
-
-    - name: Upload
+    - name: Upload Dylib
       uses: actions/upload-artifact@v4
       with:
-        name: headers
-        path: headers.txt
+        name: MinecraftCheat-Dylib
+        path: MinecraftCheat.dylib
