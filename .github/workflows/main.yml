@@ -1,8 +1,6 @@
-name: Build Dylib
+name: Analyze IPA
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -10,15 +8,66 @@ jobs:
     runs-on: macos-15
 
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
-
-    - name: Compile Dylib
+    - name: Setup class-dump
       run: |
-        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
+        curl -L -o /usr/local/bin/class-dump https://github.com/AloneMonkey/MonkeyDev/raw/master/bin/class-dump
+        chmod +x /usr/local/bin/class-dump
 
-    - name: Upload Dylib
+    - name: Get download URL from release
+      run: |
+        # Получаем прямую ссылку через API
+        curl -s "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases/tags/v1.0" > release.json
+        
+        echo "=== Файлы в релизе ==="
+        cat release.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    print(f'  {a[\"name\"]} ({a[\"size\"]} bytes)')
+"
+        
+        # Получаем URL для скачивания
+        URL=$(cat release.json | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for a in data.get('assets', []):
+    if '.ipa' in a['name']:
+        print(a['browser_download_url'])
+        break
+")
+        echo "URL=$URL" >> $GITHUB_ENV
+
+    - name: Download IPA
+      run: |
+        echo "Скачиваю: $URL"
+        curl -L -o mcpe.ipa "$URL"
+        ls -la mcpe.ipa
+
+    - name: Analyze binary
+      run: |
+        unzip -o mcpe.ipa -d out
+        cd out/Payload/*.app
+        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        echo "Binary: $BIN"
+        class-dump "$BIN" > $GITHUB_WORKSPACE/headers.txt 2>&1
+        echo "Lines: $(wc -l < $GITHUB_WORKSPACE/headers.txt)"
+
+    - name: Show important classes
+      run: |
+        echo "=== Actor/Player/Mob/Entity ==="
+        grep -i "interface.*actor\|interface.*player\|interface.*mob\|interface.*entity" headers.txt | head -40
+        echo ""
+        echo "=== AABB/Hitbox ==="
+        grep -i "getAABB\|getHitbox\|aabb\|boundingBox" headers.txt | head -20
+        echo ""
+        echo "=== Render ==="
+        grep -i "renderEntity\|renderPlayer\|LevelRender" headers.txt | head -20
+        echo ""
+        echo "=== Level/Chunk/Block ==="
+        grep -i "interface.*level\|interface.*chunk\|interface.*block" headers.txt | head -30
+
+    - name: Upload headers
       uses: actions/upload-artifact@v4
       with:
-        name: MinecraftCheat-Dylib
-        path: MinecraftCheat.dylib
+        name: minecraft-headers
+        path: headers.txt
