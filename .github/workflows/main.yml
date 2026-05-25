@@ -1,22 +1,16 @@
 name: Build Dylib
-
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: macos-15
-
     steps:
     - name: Checkout Code
       uses: actions/checkout@v4
-
     - name: Compile Dylib
-      run: |
-        clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics -framework AVFoundation -framework QuartzCore Tweak.mm -o MinecraftCheat.dylib
-
+      run: clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics -framework AVFoundation -framework QuartzCore Tweak.mm -o MinecraftCheat.dylib
     - name: Upload Dylib
       uses: actions/upload-artifact@v4
       with:
