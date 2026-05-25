@@ -12,14 +12,17 @@ static float hitboxScale = 1.0;
 static int chunkLoadRadius = 4;
 static NSMutableArray *friendsList = nil;
 
-// ========== СТРУКТУРЫ MCPE ==========
-typedef struct { float x, y, z; } Vec3;
-typedef struct { float minX, minY, minZ, maxX, maxY, maxZ; } AABB;
+// ========== ECS КОМПОНЕНТЫ (из strings.txt) ==========
+// HitboxComponent — хранит размеры хитбокса
+// AABBShapeComponent — форма AABB
+// ActorOwnerComponent — владелец актора
+// PlayerComponent — компонент игрока
+// LocalPlayerComponent — локальный игрок
+// StateVectorComponent — позиция
 
-// ========== ОРИГИНАЛЫ ХУКОВ ==========
-static IMP orig_Actor_getAABB = NULL;
-static IMP orig_LevelRenderer_renderEntities = NULL;
-static IMP orig_GameMode_attack = NULL;
+// ========== ХРАНЕНИЕ ОРИГИНАЛОВ ==========
+static IMP orig_HitboxComponent_getHitbox = NULL;
+static IMP orig_LevelRendererCamera_queueRenderEntities = NULL;
 
 // ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
@@ -35,121 +38,112 @@ static UIWindow *GetKeyWindow(void) {
     return w;
 }
 
-// ========== ХУК: Actor::getAABB (ХИТБОКСЫ) ==========
-static AABB hooked_Actor_getAABB(id self, SEL _cmd) {
-    typedef AABB (*Original)(id, SEL);
-    Original orig = (Original)orig_Actor_getAABB;
-    AABB box = orig ? orig(self, _cmd) : (AABB){0};
+// ========== ХУК: HitboxComponent (хитбоксы) ==========
+static void *hooked_HitboxComponent_getHitbox(id self, SEL _cmd) {
+    typedef void *(*OrigFunc)(id, SEL);
+    OrigFunc orig = (OrigFunc)orig_HitboxComponent_getHitbox;
     
-    if (!hitboxesEnabled || !orig) return box;
+    if (!hitboxesEnabled || !orig) {
+        return orig ? orig(self, _cmd) : NULL;
+    }
     
-    // Проверка на друга
+    // Получаем оригинальный хитбокс
+    float *box = (float *)orig(self, _cmd);
+    if (!box) return NULL;
+    
+    // Проверка на друга (если есть метод getName)
     if ([self respondsToSelector:NSSelectorFromString(@"getName")]) {
         NSString *name = [self performSelector:NSSelectorFromString(@"getName")];
         if (name && [friendsList containsObject:name]) return box;
     }
-    if ([self respondsToSelector:NSSelectorFromString(@"getPlayerName")]) {
-        NSString *name = [self performSelector:NSSelectorFromString(@"getPlayerName")];
-        if (name && [friendsList containsObject:name]) return box;
-    }
     
     // Увеличиваем хитбокс
-    float cx = (box.minX + box.maxX) / 2;
-    float cy = (box.minY + box.maxY) / 2;
-    float cz = (box.minZ + box.maxZ) / 2;
-    float hx = (box.maxX - box.minX) / 2 * hitboxScale;
-    float hy = (box.maxY - box.minY) / 2 * hitboxScale;
-    float hz = (box.maxZ - box.minZ) / 2 * hitboxScale;
-    
-    box.minX = cx - hx; box.maxX = cx + hx;
-    box.minY = cy - hy; box.maxY = cy + hy;
-    box.minZ = cz - hz; box.maxZ = cz + hz;
-    
-    return box;
+    @try {
+        float cx = (box[0] + box[3]) / 2.0f;
+        float cy = (box[1] + box[4]) / 2.0f;
+        float cz = (box[2] + box[5]) / 2.0f;
+        float hx = (box[3] - box[0]) / 2.0f * hitboxScale;
+        float hy = (box[4] - box[1]) / 2.0f * hitboxScale;
+        float hz = (box[5] - box[2]) / 2.0f * hitboxScale;
+        
+        static float modifiedBox[6];
+        modifiedBox[0] = cx - hx; modifiedBox[3] = cx + hx;
+        modifiedBox[1] = cy - hy; modifiedBox[4] = cy + hy;
+        modifiedBox[2] = cz - hz; modifiedBox[5] = cz + hz;
+        
+        return modifiedBox;
+    } @catch (NSException *e) {
+        return box;
+    }
 }
 
-// ========== ХУК: LevelRenderer::renderEntities (ESP) ==========
-static void hooked_LevelRenderer_renderEntities(id self, SEL _cmd, void *entities, void *camera) {
-    typedef void (*Original)(id, SEL, void *, void *);
-    Original orig = (Original)orig_LevelRenderer_renderEntities;
+// ========== ХУК: LevelRendererCamera::queueRenderEntities (ESP) ==========
+static void hooked_LevelRendererCamera_queueRenderEntities(id self, SEL _cmd, void *params) {
+    typedef void (*OrigFunc)(id, SEL, void *);
+    OrigFunc orig = (OrigFunc)orig_LevelRendererCamera_queueRenderEntities;
     
-    // Сначала оригинальный рендер
-    if (orig) orig(self, _cmd, entities, camera);
+    // Вызываем оригинал
+    if (orig) orig(self, _cmd, params);
     
     // ESP игроков
     if (playerESPEnabled) {
-        id level = nil;
-        if ([self respondsToSelector:NSSelectorFromString(@"getLevel")])
-            level = [self performSelector:NSSelectorFromString(@"getLevel")];
-        
-        if (level && [level respondsToSelector:NSSelectorFromString(@"getPlayers")]) {
-            NSArray *players = [level performSelector:NSSelectorFromString(@"getPlayers")];
-            for (id player in players) {
-                // Пропускаем друзей
-                NSString *name = nil;
-                if ([player respondsToSelector:NSSelectorFromString(@"getName")])
-                    name = [player performSelector:NSSelectorFromString(@"getName")];
-                if (name && [friendsList containsObject:name]) continue;
-                
-                // Получаем позицию и рисуем ESP
-                if ([player respondsToSelector:NSSelectorFromString(@"getPosition")]) {
-                    Vec3 *pos = (Vec3 *)[[player performSelector:NSSelectorFromString(@"getPosition")] bytes];
-                    if (pos) {
-                        // ESP box через dispatch_async на главный поток
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            // Упрощённый ESP (в реальности нужен WorldToScreen)
-                            UIView *esp = [[UIView alloc] initWithFrame:CGRectMake(100, 100, 50*hitboxScale, 50*hitboxScale)];
-                            esp.layer.borderColor = [UIColor redColor].CGColor;
-                            esp.layer.borderWidth = 2;
-                            esp.tag = 7777;
-                            UIWindow *w = GetKeyWindow();
-                            if (w) {
-                                for (UIView *v in w.subviews) if (v.tag == 7777) [v removeFromSuperview];
-                                [w addSubview:esp];
-                            }
-                        });
-                    }
-                }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Удаляем старые ESP боксы
+            UIWindow *w = GetKeyWindow();
+            if (!w) return;
+            
+            for (UIView *v in w.subviews) {
+                if (v.tag == 7777) [v removeFromSuperview];
             }
-        }
+            
+            // Здесь должен быть WorldToScreen и отрисовка боксов
+            // Пока рисуем тестовый квадрат
+            UIView *esp = [[UIView alloc] initWithFrame:CGRectMake(150, 300, 50*hitboxScale, 50*hitboxScale)];
+            esp.layer.borderColor = [UIColor redColor].CGColor;
+            esp.layer.borderWidth = 2.0f;
+            esp.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.2f];
+            esp.tag = 7777;
+            [w addSubview:esp];
+        });
     }
 }
 
 // ========== УСТАНОВКА ХУКОВ ==========
 static void InstallHooks(void) {
-    NSLog(@"[MCPE] Installing hooks...");
+    NSLog(@"[MCPE] Installing hooks for ECS system...");
     
-    // 1. Actor::getAABB
-    NSArray *actorClasses = @[@"Actor", @"Mob", @"Player", @"ServerPlayer", @"LocalPlayer", 
-                              @"Entity", @"LivingEntity", @"Monster", @"Animal"];
-    NSArray *aabbMethods = @[@"getAABB", @"getBoundingBox", @"getHitbox", @"aabb", 
-                             @"getCollisionBox", @"getBounds", @"boundingBox"];
+    // 1. HitboxComponent
+    NSArray *hitboxClasses = @[@"HitboxComponent", @"AABBShapeComponent", 
+                                @"ActorHitboxComponent", @"EntityHitboxComponent"];
+    NSArray *hitboxMethods = @[@"getHitbox", @"getAABB", @"getBox", @"getBoundingBox",
+                                @"hitbox", @"aabb", @"box"];
     
-    for (NSString *clsName in actorClasses) {
+    for (NSString *clsName in hitboxClasses) {
         Class cls = NSClassFromString(clsName);
         if (!cls) continue;
         
-        for (NSString *mtdName in aabbMethods) {
+        for (NSString *mtdName in hitboxMethods) {
             SEL sel = NSSelectorFromString(mtdName);
             Method method = class_getInstanceMethod(cls, sel);
             if (!method) method = class_getClassMethod(cls, sel);
             if (!method) continue;
             
-            orig_Actor_getAABB = method_getImplementation(method);
-            method_setImplementation(method, (IMP)hooked_Actor_getAABB);
-            NSLog(@"[MCPE] Hooked: %@::%@", clsName, mtdName);
+            orig_HitboxComponent_getHitbox = method_getImplementation(method);
+            method_setImplementation(method, (IMP)hooked_HitboxComponent_getHitbox);
+            NSLog(@"[MCPE] ✅ Hitbox hook: %@::%@", clsName, mtdName);
             goto hook2;
         }
     }
+    NSLog(@"[MCPE] ❌ Hitbox component not found");
     
 hook2:
-    // 2. LevelRenderer::renderEntities
-    NSArray *rendererClasses = @[@"LevelRenderer", @"WorldRenderer", @"GameRenderer", 
-                                 @"RenderLayer", @"MinecraftRenderer"];
-    NSArray *renderMethods = @[@"renderEntities:camera:", @"renderEntities:", 
-                               @"renderPlayers:", @"onRender:", @"render:"];
+    // 2. LevelRendererCamera::queueRenderEntities
+    NSArray *renderClasses = @[@"LevelRendererCamera", @"LevelRenderer", 
+                                @"LevelRendererPlayer", @"MinecraftRenderer"];
+    NSArray *renderMethods = @[@"queueRenderEntities:", @"renderEntities:", 
+                                @"renderPlayers:", @"render:"];
     
-    for (NSString *clsName in rendererClasses) {
+    for (NSString *clsName in renderClasses) {
         Class cls = NSClassFromString(clsName);
         if (!cls) continue;
         
@@ -158,16 +152,13 @@ hook2:
             Method method = class_getInstanceMethod(cls, sel);
             if (!method) continue;
             
-            orig_LevelRenderer_renderEntities = method_getImplementation(method);
-            method_setImplementation(method, (IMP)hooked_LevelRenderer_renderEntities);
-            NSLog(@"[MCPE] Hooked: %@::%@", clsName, mtdName);
+            orig_LevelRendererCamera_queueRenderEntities = method_getImplementation(method);
+            method_setImplementation(method, (IMP)hooked_LevelRendererCamera_queueRenderEntities);
+            NSLog(@"[MCPE] ✅ Render hook: %@::%@", clsName, mtdName);
             return;
         }
     }
-    
-    NSLog(@"[MCPE] Hooks installed: AABB=%d Render=%d", 
-          orig_Actor_getAABB != NULL, 
-          orig_LevelRenderer_renderEntities != NULL);
+    NSLog(@"[MCPE] ❌ Renderer not found");
 }
 
 // ========== МЕНЮ ==========
@@ -192,13 +183,12 @@ hook2:
     
     float w = self.view.frame.size.width - 24, y = 12;
     
-    // Заголовок
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 22)];
-    t.text = @"MCPE Cheats v5.0"; t.textColor = [UIColor greenColor];
+    t.text = @"MCPE Cheats ECS"; t.textColor = [UIColor greenColor];
     t.font = [UIFont boldSystemFontOfSize:16]; t.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:t]; y += 30;
     
-    // === HITBOXES ===
+    // Hitboxes
     UIButton *hb = [self btn:CGRectMake(12, y, w, 32) title:hitboxesEnabled ? @"✓ Hitboxes" : @"✗ Hitboxes" 
                        color:hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor] action:@selector(tglHB:)];
     [self.view addSubview:hb]; y += 36;
@@ -214,17 +204,17 @@ hook2:
     [hs addTarget:self action:@selector(chgHS:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:hs]; y += 30;
     
-    // === PLAYER ESP ===
+    // Player ESP
     UIButton *pe = [self btn:CGRectMake(12, y, w, 32) title:playerESPEnabled ? @"✓ Player ESP" : @"✗ Player ESP"
                        color:playerESPEnabled ? [UIColor cyanColor] : [UIColor darkGrayColor] action:@selector(tglPE:)];
     [self.view addSubview:pe]; y += 36;
     
-    // === BLOCK ESP ===
+    // Block ESP
     UIButton *be = [self btn:CGRectMake(12, y, w, 32) title:blockESPEnabled ? @"✓ Block ESP" : @"✗ Block ESP"
                        color:blockESPEnabled ? [UIColor orangeColor] : [UIColor darkGrayColor] action:@selector(tglBE:)];
     [self.view addSubview:be]; y += 36;
     
-    // === CHUNK LOAD ===
+    // Chunks
     self.chunkSizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
     self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius];
     self.chunkSizeLabel.textColor = [UIColor whiteColor]; self.chunkSizeLabel.font = [UIFont systemFontOfSize:11];
@@ -236,7 +226,7 @@ hook2:
     [cs addTarget:self action:@selector(chgCL:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:cs]; y += 30;
     
-    // === ДРУЗЬЯ ===
+    // Friends
     self.tf = [[UITextField alloc] initWithFrame:CGRectMake(12, y, w-52, 28)];
     self.tf.placeholder = @"Ник друга"; self.tf.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1];
     self.tf.textColor = [UIColor whiteColor]; self.tf.font = [UIFont systemFontOfSize:13];
@@ -254,7 +244,6 @@ hook2:
     self.tv.delegate = self; self.tv.dataSource = self; self.tv.rowHeight = 24;
     [self.view addSubview:self.tv]; y += 55;
     
-    // === ЗАКРЫТЬ ===
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
     close.frame = CGRectMake(12, y, w, 30); close.backgroundColor = [UIColor redColor];
     [close setTitle:@"Закрыть" forState:UIControlStateNormal]; close.titleLabel.font = [UIFont boldSystemFontOfSize:14];
@@ -271,13 +260,13 @@ hook2:
     return b;
 }
 
-- (void)tglHB:(UIButton *)s { hitboxesEnabled = !hitboxesEnabled; [self reloadMenu]; }
+- (void)tglHB:(UIButton *)s { hitboxesEnabled = !hitboxesEnabled; [self reload]; }
 - (void)chgHS:(UISlider *)s { hitboxScale = s.value; self.hitboxSizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale]; }
-- (void)tglPE:(UIButton *)s { playerESPEnabled = !playerESPEnabled; [self reloadMenu]; }
-- (void)tglBE:(UIButton *)s { blockESPEnabled = !blockESPEnabled; [self reloadMenu]; }
+- (void)tglPE:(UIButton *)s { playerESPEnabled = !playerESPEnabled; [self reload]; }
+- (void)tglBE:(UIButton *)s { blockESPEnabled = !blockESPEnabled; [self reload]; }
 - (void)chgCL:(UISlider *)s { chunkLoadRadius = (int)s.value; self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius]; }
 - (void)addF { NSString *n = [self.tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; if (n.length && ![friendsList containsObject:n]) { [friendsList addObject:n]; [self.tv reloadData]; self.tf.text = @""; [self.tf resignFirstResponder]; } }
-- (void)reloadMenu { [self dismissViewControllerAnimated:NO completion:nil]; menuVisible = NO; }
+- (void)reload { [self dismissViewControllerAnimated:NO completion:nil]; menuVisible = NO; }
 - (void)closeM { menuVisible = NO; [self dismissViewControllerAnimated:YES completion:nil]; }
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [self addF]; return YES; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return friendsList.count; }
@@ -303,7 +292,7 @@ hook2:
 }
 - (void)tap {
     if (menuVisible) return; menuVisible = YES;
-    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 280, 340);
+    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 280, 350);
     m.modalPresentationStyle = UIModalPresentationFormSheet;
     UIWindow *w = GetKeyWindow(); if (w && w.rootViewController) [w.rootViewController presentViewController:m animated:YES completion:nil];
 }
