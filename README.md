@@ -1,2 +1,0 @@
-# decompMine
-67
