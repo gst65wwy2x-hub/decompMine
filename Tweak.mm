@@ -1,10 +1,16 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 
+// ========== ПЕРЕМЕННЫЕ ==========
 static UIButton *floatingButton = nil;
 static BOOL menuVisible = NO;
+static BOOL hitboxesEnabled = NO;
+static float hitboxScale = 1.0;
 static NSMutableArray *friendsList = nil;
+static IMP orig_getAABB = NULL;
 
+// ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
     UIWindow *w = nil;
     if (@available(iOS 13.0, *)) {
@@ -18,9 +24,58 @@ static UIWindow *GetKeyWindow(void) {
     return w;
 }
 
+// ========== ХУК ХИТБОКСОВ ==========
+static void *hooked_getAABB(id self, SEL _cmd) {
+    typedef void *(*F)(id, SEL);
+    F orig = (F)orig_getAABB;
+    if (!hitboxesEnabled || !orig) return orig(self, _cmd);
+    
+    // Пропускаем друзей
+    NSString *name = nil;
+    if ([self respondsToSelector:NSSelectorFromString(@"getName")])
+        name = [self performSelector:NSSelectorFromString(@"getName")];
+    if (name && [friendsList containsObject:name]) return orig(self, _cmd);
+    
+    // Меняем хитбокс
+    float *box = (float *)orig(self, _cmd);
+    if (!box) return NULL;
+    
+    @try {
+        float cx = (box[0]+box[3])/2, cy = (box[1]+box[4])/2, cz = (box[2]+box[5])/2;
+        float hx = (box[3]-box[0])/2*hitboxScale, hy = (box[4]-box[1])/2*hitboxScale, hz = (box[5]-box[2])/2*hitboxScale;
+        box[0]=cx-hx; box[3]=cx+hx; box[1]=cy-hy; box[4]=cy+hy; box[2]=cz-hz; box[5]=cz+hz;
+    } @catch (NSException *e) {}
+    
+    return box;
+}
+
+// ========== АВТО-УСТАНОВКА ХУКОВ ==========
+static void InstallHooks(void) {
+    NSArray *classes = @[@"Actor", @"Entity", @"Mob", @"Player", @"ServerPlayer", @"LocalPlayer"];
+    NSArray *methods = @[@"getAABB", @"getBoundingBox", @"getHitbox", @"aabb", @"getCollisionBox"];
+    
+    for (NSString *c in classes) {
+        for (NSString *m in methods) {
+            Class cls = NSClassFromString(c);
+            if (!cls) continue;
+            SEL sel = NSSelectorFromString(m);
+            Method meth = class_getInstanceMethod(cls, sel);
+            if (!meth) meth = class_getClassMethod(cls, sel);
+            if (!meth) continue;
+            orig_getAABB = method_getImplementation(meth);
+            method_setImplementation(meth, (IMP)hooked_getAABB);
+            NSLog(@"[MCPE] Хук установлен: %@::%@", c, m);
+            return;
+        }
+    }
+    NSLog(@"[MCPE] Хуки не найдены");
+}
+
+// ========== МЕНЮ ==========
 @interface MenuVC : UIViewController <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) UITextField *tf;
+@property (nonatomic, strong) UILabel *sizeLabel;
 @end
 
 @implementation MenuVC
@@ -37,18 +92,35 @@ static UIWindow *GetKeyWindow(void) {
     
     float w = self.view.frame.size.width - 24, y = 12;
     
+    // Заголовок
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 22)];
     t.text = @"MCPE Cheats"; t.textColor = [UIColor greenColor];
     t.font = [UIFont boldSystemFontOfSize:16]; t.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:t]; y += 30;
     
+    // Кнопка Hitboxes
     UIButton *hb = [UIButton buttonWithType:UIButtonTypeCustom];
-    hb.frame = CGRectMake(12, y, w, 32);
-    hb.backgroundColor = [UIColor darkGrayColor];
-    [hb setTitle:@"Hitboxes: OFF" forState:UIControlStateNormal];
+    hb.frame = CGRectMake(12, y, w, 32); hb.tag = 100;
+    hb.backgroundColor = hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor];
+    [hb setTitle:hitboxesEnabled ? @"✓ Hitboxes: ON" : @"✗ Hitboxes: OFF" forState:UIControlStateNormal];
+    [hb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     hb.titleLabel.font = [UIFont boldSystemFontOfSize:12]; hb.layer.cornerRadius = 5;
-    [self.view addSubview:hb]; y += 40;
+    [hb addTarget:self action:@selector(tgl:) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:hb]; y += 36;
     
+    // Слайдер размера
+    self.sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
+    self.sizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale];
+    self.sizeLabel.textColor = [UIColor whiteColor]; self.sizeLabel.font = [UIFont systemFontOfSize:11];
+    [self.view addSubview:self.sizeLabel]; y += 16;
+    
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
+    sl.minimumValue = 0.5; sl.maximumValue = 5.0; sl.value = hitboxScale;
+    sl.minimumTrackTintColor = [UIColor greenColor];
+    [sl addTarget:self action:@selector(sc:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:sl]; y += 30;
+    
+    // Поле ввода друга
     self.tf = [[UITextField alloc] initWithFrame:CGRectMake(12, y, w-52, 28)];
     self.tf.placeholder = @"Ник друга"; self.tf.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1];
     self.tf.textColor = [UIColor whiteColor]; self.tf.font = [UIFont systemFontOfSize:13];
@@ -61,19 +133,29 @@ static UIWindow *GetKeyWindow(void) {
     add.layer.cornerRadius = 5; [add addTarget:self action:@selector(addF) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:add]; y += 34;
     
+    // Таблица друзей
     self.tv = [[UITableView alloc] initWithFrame:CGRectMake(12, y, w, 60) style:UITableViewStylePlain];
     self.tv.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:0.9];
     self.tv.delegate = self; self.tv.dataSource = self; self.tv.rowHeight = 24;
+    self.tv.layer.cornerRadius = 5;
     [self.view addSubview:self.tv]; y += 64;
     
+    // Кнопка закрыть
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
     close.frame = CGRectMake(12, y, w, 30); close.backgroundColor = [UIColor redColor];
     [close setTitle:@"Закрыть" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     close.titleLabel.font = [UIFont boldSystemFontOfSize:14]; close.layer.cornerRadius = 6;
     [close addTarget:self action:@selector(closeM) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:close];
 }
 
+- (void)tgl:(UIButton *)s {
+    hitboxesEnabled = !hitboxesEnabled;
+    s.backgroundColor = hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor];
+    [s setTitle:hitboxesEnabled ? @"✓ Hitboxes: ON" : @"✗ Hitboxes: OFF" forState:UIControlStateNormal];
+}
+- (void)sc:(UISlider *)s { hitboxScale = s.value; self.sizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale]; }
 - (void)addF { NSString *n = [self.tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; if (n.length && ![friendsList containsObject:n]) { [friendsList addObject:n]; [self.tv reloadData]; self.tf.text = @""; [self.tf resignFirstResponder]; } }
 - (void)closeM { menuVisible = NO; [self dismissViewControllerAnimated:YES completion:nil]; }
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [self addF]; return YES; }
@@ -84,8 +166,12 @@ static UIWindow *GetKeyWindow(void) {
     if (ip.row < friendsList.count) { id o = friendsList[ip.row]; c.textLabel.text = [o isKindOfClass:[NSString class]] ? o : [NSString stringWithFormat:@"%@", o]; }
     return c;
 }
+- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)es forRowAtIndexPath:(NSIndexPath *)ip {
+    if (es == UITableViewCellEditingStyleDelete && ip.row < friendsList.count) { [friendsList removeObjectAtIndex:ip.row]; [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade]; }
+}
 @end
 
+// ========== КНОПКА ==========
 @interface Handler : NSObject @end
 @implementation Handler
 - (void)drag:(UIPanGestureRecognizer *)g {
@@ -99,16 +185,23 @@ static UIWindow *GetKeyWindow(void) {
 }
 - (void)tap {
     if (menuVisible) return; menuVisible = YES;
-    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 260, 250);
+    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 270, 290);
     m.modalPresentationStyle = UIModalPresentationFormSheet;
     UIWindow *w = GetKeyWindow(); if (w && w.rootViewController) [w.rootViewController presentViewController:m animated:YES completion:nil];
 }
 @end
 
+// ========== ЗАПУСК ==========
 static Handler *h = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Установка хуков с задержкой (ждём загрузки игры)
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            InstallHooks();
+        });
+        
+        // Кнопка
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingButton.frame = CGRectMake(50, 200, 50, 50); floatingButton.layer.cornerRadius = 25;
         floatingButton.clipsToBounds = YES;
