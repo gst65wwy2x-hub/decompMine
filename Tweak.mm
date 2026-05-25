@@ -28,8 +28,6 @@ static float currentFPS = 60.0;
 
 // ========== ХУКИ ==========
 static void *(*real_getAABB)(void *) = NULL;
-static void *(*real_getPlayers)(void *) = NULL;
-static void *(*real_getPosition)(void *) = NULL;
 
 static void *hooked_getAABB(void *self) {
     if (!hitboxEnabled || !real_getAABB) return real_getAABB ? real_getAABB(self) : NULL;
@@ -92,9 +90,7 @@ static void PlayHitSound(int type) {
 static void SearchHooks(void) {
     void *h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
-    real_getAABB = dlsym(h, "getAABB");
-    real_getPlayers = dlsym(h, "getPlayers");
-    real_getPosition = dlsym(h, "getPosition");
+    real_getAABB = (void *(*)(void *))dlsym(h, "getAABB");
     if (real_getAABB) hooksReady = YES;
     if (statusLabel) dispatch_async(dispatch_get_main_queue(), ^{
         statusLabel.text = hooksReady ? @"✅ HOOKS" : @"❌ NO HOOKS";
