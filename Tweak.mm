@@ -1,28 +1,24 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
+#import <QuartzCore/QuartzCore.h>
+#import <AVFoundation/AVFoundation.h>
 
-// ========== ПЕРЕМЕННЫЕ ==========
-static UIButton *floatingButton = nil;
+// ========== НАСТРОЙКИ ==========
+static BOOL freeLookEnabled = NO;
+static BOOL showHatESP = NO;
+static BOOL hitColorEnabled = NO;
+static float hitColorR = 1.0, hitColorG = 0.0, hitColorB = 0.0;
+static float playerAlpha = 1.0;
+static float handX = 0.0, handY = 0.0, handZ = 0.0, handScale = 1.0;
+static int skyboxType = 0;
+static int hitSoundType = 0; // 0-обычный, 1-звон, 2-хлопок, 3-монета
 static BOOL menuVisible = NO;
-static BOOL hitboxesEnabled = NO;
-static BOOL playerESPEnabled = NO;
-static BOOL blockESPEnabled = NO;
-static float hitboxScale = 1.0;
-static int chunkLoadRadius = 4;
-static NSMutableArray *friendsList = nil;
+static UIButton *floatingButton = nil;
+static AVAudioPlayer *hitSoundPlayer = nil;
 
-// ========== ECS КОМПОНЕНТЫ (из strings.txt) ==========
-// HitboxComponent — хранит размеры хитбокса
-// AABBShapeComponent — форма AABB
-// ActorOwnerComponent — владелец актора
-// PlayerComponent — компонент игрока
-// LocalPlayerComponent — локальный игрок
-// StateVectorComponent — позиция
-
-// ========== ХРАНЕНИЕ ОРИГИНАЛОВ ==========
-static IMP orig_HitboxComponent_getHitbox = NULL;
-static IMP orig_LevelRendererCamera_queueRenderEntities = NULL;
+// ========== НЕОНОВЫЕ ЦВЕТА ==========
+#define NEON_GREEN [UIColor colorWithRed:0.22 green:1.0 blue:0.08 alpha:1.0]
+#define DARK_BG [UIColor colorWithRed:0.05 green:0.08 blue:0.05 alpha:0.95]
 
 // ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
@@ -38,244 +34,236 @@ static UIWindow *GetKeyWindow(void) {
     return w;
 }
 
-// ========== ХУК: HitboxComponent (хитбоксы) ==========
-static void *hooked_HitboxComponent_getHitbox(id self, SEL _cmd) {
-    typedef void *(*OrigFunc)(id, SEL);
-    OrigFunc orig = (OrigFunc)orig_HitboxComponent_getHitbox;
-    
-    if (!hitboxesEnabled || !orig) {
-        return orig ? orig(self, _cmd) : NULL;
-    }
-    
-    // Получаем оригинальный хитбокс
-    float *box = (float *)orig(self, _cmd);
-    if (!box) return NULL;
-    
-    // Проверка на друга (если есть метод getName)
-    if ([self respondsToSelector:NSSelectorFromString(@"getName")]) {
-        NSString *name = [self performSelector:NSSelectorFromString(@"getName")];
-        if (name && [friendsList containsObject:name]) return box;
-    }
-    
-    // Увеличиваем хитбокс
-    @try {
-        float cx = (box[0] + box[3]) / 2.0f;
-        float cy = (box[1] + box[4]) / 2.0f;
-        float cz = (box[2] + box[5]) / 2.0f;
-        float hx = (box[3] - box[0]) / 2.0f * hitboxScale;
-        float hy = (box[4] - box[1]) / 2.0f * hitboxScale;
-        float hz = (box[5] - box[2]) / 2.0f * hitboxScale;
-        
-        static float modifiedBox[6];
-        modifiedBox[0] = cx - hx; modifiedBox[3] = cx + hx;
-        modifiedBox[1] = cy - hy; modifiedBox[4] = cy + hy;
-        modifiedBox[2] = cz - hz; modifiedBox[5] = cz + hz;
-        
-        return modifiedBox;
-    } @catch (NSException *e) {
-        return box;
-    }
+static void AddGlow(UIView *view, UIColor *color, float radius) {
+    view.layer.shadowColor = color.CGColor;
+    view.layer.shadowOffset = CGSizeZero;
+    view.layer.shadowRadius = radius;
+    view.layer.shadowOpacity = 1.0;
+    view.layer.masksToBounds = NO;
 }
 
-// ========== ХУК: LevelRendererCamera::queueRenderEntities (ESP) ==========
-static void hooked_LevelRendererCamera_queueRenderEntities(id self, SEL _cmd, void *params) {
-    typedef void (*OrigFunc)(id, SEL, void *);
-    OrigFunc orig = (OrigFunc)orig_LevelRendererCamera_queueRenderEntities;
-    
-    // Вызываем оригинал
-    if (orig) orig(self, _cmd, params);
-    
-    // ESP игроков
-    if (playerESPEnabled) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            // Удаляем старые ESP боксы
-            UIWindow *w = GetKeyWindow();
-            if (!w) return;
-            
-            for (UIView *v in w.subviews) {
-                if (v.tag == 7777) [v removeFromSuperview];
-            }
-            
-            // Здесь должен быть WorldToScreen и отрисовка боксов
-            // Пока рисуем тестовый квадрат
-            UIView *esp = [[UIView alloc] initWithFrame:CGRectMake(150, 300, 50*hitboxScale, 50*hitboxScale)];
-            esp.layer.borderColor = [UIColor redColor].CGColor;
-            esp.layer.borderWidth = 2.0f;
-            esp.backgroundColor = [[UIColor redColor] colorWithAlphaComponent:0.2f];
-            esp.tag = 7777;
-            [w addSubview:esp];
-        });
+// Воспроизвести звук удара
+static void PlayHitSound(int type) {
+    NSString *soundName = nil;
+    switch (type) {
+        case 1: soundName = @"bell"; break;      // Звон
+        case 2: soundName = @"pop"; break;        // Хлопок
+        case 3: soundName = @"coin"; break;       // Монета
+        default: return;                          // Обычный (не меняем)
     }
-}
-
-// ========== УСТАНОВКА ХУКОВ ==========
-static void InstallHooks(void) {
-    NSLog(@"[MCPE] Installing hooks for ECS system...");
     
-    // 1. HitboxComponent
-    NSArray *hitboxClasses = @[@"HitboxComponent", @"AABBShapeComponent", 
-                                @"ActorHitboxComponent", @"EntityHitboxComponent"];
-    NSArray *hitboxMethods = @[@"getHitbox", @"getAABB", @"getBox", @"getBoundingBox",
-                                @"hitbox", @"aabb", @"box"];
-    
-    for (NSString *clsName in hitboxClasses) {
-        Class cls = NSClassFromString(clsName);
-        if (!cls) continue;
-        
-        for (NSString *mtdName in hitboxMethods) {
-            SEL sel = NSSelectorFromString(mtdName);
-            Method method = class_getInstanceMethod(cls, sel);
-            if (!method) method = class_getClassMethod(cls, sel);
-            if (!method) continue;
-            
-            orig_HitboxComponent_getHitbox = method_getImplementation(method);
-            method_setImplementation(method, (IMP)hooked_HitboxComponent_getHitbox);
-            NSLog(@"[MCPE] ✅ Hitbox hook: %@::%@", clsName, mtdName);
-            goto hook2;
-        }
+    NSString *path = [NSString stringWithFormat:@"/System/Library/Audio/UISounds/%@.caf", soundName];
+    NSURL *url = [NSURL fileURLWithPath:path];
+    if (url) {
+        hitSoundPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
+        [hitSoundPlayer play];
     }
-    NSLog(@"[MCPE] ❌ Hitbox component not found");
-    
-hook2:
-    // 2. LevelRendererCamera::queueRenderEntities
-    NSArray *renderClasses = @[@"LevelRendererCamera", @"LevelRenderer", 
-                                @"LevelRendererPlayer", @"MinecraftRenderer"];
-    NSArray *renderMethods = @[@"queueRenderEntities:", @"renderEntities:", 
-                                @"renderPlayers:", @"render:"];
-    
-    for (NSString *clsName in renderClasses) {
-        Class cls = NSClassFromString(clsName);
-        if (!cls) continue;
-        
-        for (NSString *mtdName in renderMethods) {
-            SEL sel = NSSelectorFromString(mtdName);
-            Method method = class_getInstanceMethod(cls, sel);
-            if (!method) continue;
-            
-            orig_LevelRendererCamera_queueRenderEntities = method_getImplementation(method);
-            method_setImplementation(method, (IMP)hooked_LevelRendererCamera_queueRenderEntities);
-            NSLog(@"[MCPE] ✅ Render hook: %@::%@", clsName, mtdName);
-            return;
-        }
-    }
-    NSLog(@"[MCPE] ❌ Renderer not found");
 }
 
 // ========== МЕНЮ ==========
-@interface MenuVC : UIViewController <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
-@property (nonatomic, strong) UITableView *tv;
-@property (nonatomic, strong) UITextField *tf;
-@property (nonatomic, strong) UILabel *hitboxSizeLabel;
-@property (nonatomic, strong) UILabel *chunkSizeLabel;
+@interface CreeperMenuVC : UIViewController
 @end
 
-@implementation MenuVC
+@implementation CreeperMenuVC
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    if (!friendsList) friendsList = [NSMutableArray array];
     
-    self.view.backgroundColor = [UIColor colorWithRed:0.05 green:0.05 blue:0.05 alpha:0.92];
-    self.view.layer.cornerRadius = 14;
-    self.view.layer.borderWidth = 1.5;
-    self.view.layer.borderColor = [UIColor greenColor].CGColor;
-    self.view.clipsToBounds = YES;
+    float menuW = 290;
+    float menuH = 420;
+    float x = (self.view.frame.size.width - menuW) / 2;
+    float y = (self.view.frame.size.height - menuH) / 2;
     
-    float w = self.view.frame.size.width - 24, y = 12;
+    // Фон с неоновым свечением
+    UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(x, y, menuW, menuH)];
+    bg.backgroundColor = DARK_BG;
+    bg.layer.cornerRadius = 18;
+    bg.layer.borderWidth = 2;
+    bg.layer.borderColor = NEON_GREEN.CGColor;
+    AddGlow(bg, NEON_GREEN, 15);
+    [self.view addSubview:bg];
     
-    UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 22)];
-    t.text = @"MCPE Cheats ECS"; t.textColor = [UIColor greenColor];
-    t.font = [UIFont boldSystemFontOfSize:16]; t.textAlignment = NSTextAlignmentCenter;
-    [self.view addSubview:t]; y += 30;
+    float w = menuW - 30;
+    float cy = 15;
     
-    // Hitboxes
-    UIButton *hb = [self btn:CGRectMake(12, y, w, 32) title:hitboxesEnabled ? @"✓ Hitboxes" : @"✗ Hitboxes" 
-                       color:hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor] action:@selector(tglHB:)];
-    [self.view addSubview:hb]; y += 36;
+    // ===== HEADER =====
+    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(15, cy, w, 50)];
+    header.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.15];
+    header.layer.cornerRadius = 12;
+    AddGlow(header, NEON_GREEN, 5);
+    [bg addSubview:header];
     
-    self.hitboxSizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
-    self.hitboxSizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale];
-    self.hitboxSizeLabel.textColor = [UIColor whiteColor]; self.hitboxSizeLabel.font = [UIFont systemFontOfSize:11];
-    [self.view addSubview:self.hitboxSizeLabel]; y += 16;
+    UILabel *icon = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, 34, 34)];
+    icon.text = @"☠️";
+    icon.font = [UIFont systemFontOfSize:26];
+    [header addSubview:icon];
     
-    UISlider *hs = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
-    hs.minimumValue = 0.5; hs.maximumValue = 5.0; hs.value = hitboxScale;
-    hs.minimumTrackTintColor = [UIColor greenColor];
-    [hs addTarget:self action:@selector(chgHS:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:hs]; y += 30;
+    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(48, 5, w - 100, 22)];
+    title.text = @"CREEPER VISUAL";
+    title.textColor = NEON_GREEN;
+    title.font = [UIFont boldSystemFontOfSize:17];
+    AddGlow(title, NEON_GREEN, 3);
+    [header addSubview:title];
     
-    // Player ESP
-    UIButton *pe = [self btn:CGRectMake(12, y, w, 32) title:playerESPEnabled ? @"✓ Player ESP" : @"✗ Player ESP"
-                       color:playerESPEnabled ? [UIColor cyanColor] : [UIColor darkGrayColor] action:@selector(tglPE:)];
-    [self.view addSubview:pe]; y += 36;
+    UILabel *ver = [[UILabel alloc] initWithFrame:CGRectMake(48, 27, 80, 16)];
+    ver.text = @"v1.0 BETA";
+    ver.textColor = [NEON_GREEN colorWithAlphaComponent:0.7];
+    ver.font = [UIFont systemFontOfSize:10];
+    [header addSubview:ver];
     
-    // Block ESP
-    UIButton *be = [self btn:CGRectMake(12, y, w, 32) title:blockESPEnabled ? @"✓ Block ESP" : @"✗ Block ESP"
-                       color:blockESPEnabled ? [UIColor orangeColor] : [UIColor darkGrayColor] action:@selector(tglBE:)];
-    [self.view addSubview:be]; y += 36;
+    UILabel *fps = [[UILabel alloc] initWithFrame:CGRectMake(w - 75, 12, 65, 26)];
+    fps.text = @"⚡60 FPS";
+    fps.textColor = NEON_GREEN;
+    fps.font = [UIFont boldSystemFontOfSize:13];
+    fps.textAlignment = NSTextAlignmentRight;
+    AddGlow(fps, NEON_GREEN, 2);
+    [header addSubview:fps];
     
-    // Chunks
-    self.chunkSizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
-    self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius];
-    self.chunkSizeLabel.textColor = [UIColor whiteColor]; self.chunkSizeLabel.font = [UIFont systemFontOfSize:11];
-    [self.view addSubview:self.chunkSizeLabel]; y += 16;
+    cy += 60;
     
-    UISlider *cs = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
-    cs.minimumValue = 2; cs.maximumValue = 16; cs.value = chunkLoadRadius;
-    cs.minimumTrackTintColor = [UIColor purpleColor];
-    [cs addTarget:self action:@selector(chgCL:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:cs]; y += 30;
+    // ===== VISUALS =====
+    cy = [self addSectionTitle:@"🎨 VISUALS" y:cy w:w bg:bg];
+    cy = [self addSwitch:@"Free Look (360°)" y:cy w:w bg:bg tag:1];
+    cy = [self addSwitch:@"Hat ESP" y:cy w:w bg:bg tag:2];
+    cy = [self addSwitch:@"Hit Color" y:cy w:w bg:bg tag:3];
     
-    // Friends
-    self.tf = [[UITextField alloc] initWithFrame:CGRectMake(12, y, w-52, 28)];
-    self.tf.placeholder = @"Ник друга"; self.tf.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1];
-    self.tf.textColor = [UIColor whiteColor]; self.tf.font = [UIFont systemFontOfSize:13];
-    self.tf.layer.cornerRadius = 5; self.tf.delegate = self; self.tf.returnKeyType = UIReturnKeyDone;
-    [self.view addSubview:self.tf];
+    // ===== SKYBOX =====
+    cy = [self addSectionTitle:@"🌅 SKYBOX" y:cy w:w bg:bg];
+    cy = [self addSegment:@[@"Day", @"Sunset", @"Night", @"Custom"] y:cy w:w bg:bg tag:10];
     
-    UIButton *add = [UIButton buttonWithType:UIButtonTypeCustom];
-    add.frame = CGRectMake(w-36, y, 28, 28); add.backgroundColor = [UIColor greenColor];
-    [add setTitle:@"+" forState:UIControlStateNormal]; add.titleLabel.font = [UIFont boldSystemFontOfSize:18];
-    add.layer.cornerRadius = 5; [add addTarget:self action:@selector(addF) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:add]; y += 34;
+    // ===== HIT SOUND =====
+    cy = [self addSectionTitle:@"🔊 HIT SOUND" y:cy w:w bg:bg];
+    cy = [self addSegment:@[@"Default", @"Bell", @"Pop", @"Coin"] y:cy w:w bg:bg tag:20];
     
-    self.tv = [[UITableView alloc] initWithFrame:CGRectMake(12, y, w, 50) style:UITableViewStylePlain];
-    self.tv.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:0.9];
-    self.tv.delegate = self; self.tv.dataSource = self; self.tv.rowHeight = 24;
-    [self.view addSubview:self.tv]; y += 55;
+    // ===== HAND =====
+    cy = [self addSectionTitle:@"✋ HAND POSITION" y:cy w:w bg:bg];
+    cy = [self addSlider:@"X" y:cy w:w bg:bg tag:100 value:0 min:-2 max:2];
+    cy = [self addSlider:@"Y" y:cy w:w bg:bg tag:101 value:0 min:-2 max:2];
+    cy = [self addSlider:@"Z" y:cy w:w bg:bg tag:102 value:0 min:-2 max:2];
+    cy = [self addSlider:@"Scale" y:cy w:w bg:bg tag:103 value:1 min:0.5 max:3];
     
+    // ===== PLAYER =====
+    cy = [self addSectionTitle:@"👤 PLAYER" y:cy w:w bg:bg];
+    cy = [self addSlider:@"Alpha" y:cy w:w bg:bg tag:200 value:1 min:0 max:1];
+    
+    // ===== CLOSE =====
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
-    close.frame = CGRectMake(12, y, w, 30); close.backgroundColor = [UIColor redColor];
-    [close setTitle:@"Закрыть" forState:UIControlStateNormal]; close.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    close.layer.cornerRadius = 6; [close addTarget:self action:@selector(closeM) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:close];
+    close.frame = CGRectMake(15, cy + 10, w, 38);
+    close.backgroundColor = NEON_GREEN;
+    [close setTitle:@"✕ CLOSE" forState:UIControlStateNormal];
+    [close setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    close.layer.cornerRadius = 10;
+    AddGlow(close, NEON_GREEN, 10);
+    [close addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
+    [bg addSubview:close];
 }
 
-- (UIButton *)btn:(CGRect)f title:(NSString *)t color:(UIColor *)c action:(SEL)a {
-    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
-    b.frame = f; b.backgroundColor = c; [b setTitle:t forState:UIControlStateNormal];
-    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    b.titleLabel.font = [UIFont boldSystemFontOfSize:12]; b.layer.cornerRadius = 5;
-    [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
-    return b;
+- (float)addSectionTitle:(NSString *)title y:(float)y w:(float)w bg:(UIView *)bg {
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(18, y, w, 22)];
+    lbl.text = title;
+    lbl.textColor = NEON_GREEN;
+    lbl.font = [UIFont boldSystemFontOfSize:13];
+    AddGlow(lbl, NEON_GREEN, 2);
+    [bg addSubview:lbl];
+    return y + 26;
 }
 
-- (void)tglHB:(UIButton *)s { hitboxesEnabled = !hitboxesEnabled; [self reload]; }
-- (void)chgHS:(UISlider *)s { hitboxScale = s.value; self.hitboxSizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale]; }
-- (void)tglPE:(UIButton *)s { playerESPEnabled = !playerESPEnabled; [self reload]; }
-- (void)tglBE:(UIButton *)s { blockESPEnabled = !blockESPEnabled; [self reload]; }
-- (void)chgCL:(UISlider *)s { chunkLoadRadius = (int)s.value; self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius]; }
-- (void)addF { NSString *n = [self.tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; if (n.length && ![friendsList containsObject:n]) { [friendsList addObject:n]; [self.tv reloadData]; self.tf.text = @""; [self.tf resignFirstResponder]; } }
-- (void)reload { [self dismissViewControllerAnimated:NO completion:nil]; menuVisible = NO; }
-- (void)closeM { menuVisible = NO; [self dismissViewControllerAnimated:YES completion:nil]; }
-- (BOOL)textFieldShouldReturn:(UITextField *)tf { [self addF]; return YES; }
-- (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return friendsList.count; }
-- (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
-    UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"c"];
-    if (!c) { c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"]; c.backgroundColor = [UIColor clearColor]; c.textLabel.textColor = [UIColor cyanColor]; c.textLabel.font = [UIFont systemFontOfSize:12]; }
-    if (ip.row < friendsList.count) c.textLabel.text = friendsList[ip.row];
-    return c;
+- (float)addSwitch:(NSString *)name y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(15, y, w, 32)];
+    row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
+    row.layer.cornerRadius = 8;
+    [bg addSubview:row];
+    
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, 180, 20)];
+    lbl.text = name;
+    lbl.textColor = [UIColor whiteColor];
+    lbl.font = [UIFont systemFontOfSize:13];
+    [row addSubview:lbl];
+    
+    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(w - 55, 1, 45, 30)];
+    sw.onTintColor = NEON_GREEN;
+    sw.tag = tag;
+    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+    [row addSubview:sw];
+    
+    return y + 36;
 }
+
+- (float)addSlider:(NSString *)name y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag value:(float)val min:(float)min max:(float)max {
+    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(15, y, w, 36)];
+    row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
+    row.layer.cornerRadius = 8;
+    [bg addSubview:row];
+    
+    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, 40, 20)];
+    lbl.text = name;
+    lbl.textColor = NEON_GREEN;
+    lbl.font = [UIFont boldSystemFontOfSize:11];
+    [row addSubview:lbl];
+    
+    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(50, 6, w - 65, 24)];
+    sl.minimumValue = min;
+    sl.maximumValue = max;
+    sl.value = val;
+    sl.minimumTrackTintColor = NEON_GREEN;
+    sl.thumbTintColor = NEON_GREEN;
+    sl.tag = tag;
+    [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+    AddGlow(sl, NEON_GREEN, 3);
+    [row addSubview:sl];
+    
+    return y + 40;
+}
+
+- (float)addSegment:(NSArray *)items y:(float)y w:(float)w bg:(UIView *)bg tag:(int)tag {
+    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
+    seg.frame = CGRectMake(15, y, w, 32);
+    seg.selectedSegmentIndex = 0;
+    seg.tag = tag;
+    [seg addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
+    if (@available(iOS 13.0, *)) {
+        seg.selectedSegmentTintColor = NEON_GREEN;
+    }
+    [bg addSubview:seg];
+    return y + 38;
+}
+
+- (void)switchChanged:(UISwitch *)sw {
+    switch (sw.tag) {
+        case 1: freeLookEnabled = sw.isOn; break;
+        case 2: showHatESP = sw.isOn; break;
+        case 3: hitColorEnabled = sw.isOn; break;
+    }
+}
+
+- (void)sliderChanged:(UISlider *)sl {
+    switch (sl.tag) {
+        case 100: handX = sl.value; break;
+        case 101: handY = sl.value; break;
+        case 102: handZ = sl.value; break;
+        case 103: handScale = sl.value; break;
+        case 200: playerAlpha = sl.value; break;
+    }
+}
+
+- (void)segmentChanged:(UISegmentedControl *)seg {
+    if (seg.tag == 10) skyboxType = (int)seg.selectedSegmentIndex;
+    else if (seg.tag == 20) {
+        hitSoundType = (int)seg.selectedSegmentIndex;
+        PlayHitSound(hitSoundType); // Демонстрация звука при выборе
+    }
+}
+
+- (void)closeMenu {
+    menuVisible = NO;
+    [UIView animateWithDuration:0.2 animations:^{
+        self.view.alpha = 0;
+    } completion:^(BOOL f) {
+        [self.view removeFromSuperview];
+    }];
+}
+
 @end
 
 // ========== КНОПКА ==========
@@ -291,10 +279,17 @@ hook2:
     }
 }
 - (void)tap {
-    if (menuVisible) return; menuVisible = YES;
-    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 280, 350);
-    m.modalPresentationStyle = UIModalPresentationFormSheet;
-    UIWindow *w = GetKeyWindow(); if (w && w.rootViewController) [w.rootViewController presentViewController:m animated:YES completion:nil];
+    if (menuVisible) return;
+    menuVisible = YES;
+    CreeperMenuVC *m = [[CreeperMenuVC alloc] init];
+    m.view.frame = [UIScreen mainScreen].bounds;
+    m.view.backgroundColor = [UIColor clearColor];
+    UIWindow *w = GetKeyWindow();
+    if (w) {
+        m.view.alpha = 0;
+        [w addSubview:m.view];
+        [UIView animateWithDuration:0.25 animations:^{ m.view.alpha = 1; }];
+    }
 }
 @end
 
@@ -302,18 +297,16 @@ static Handler *h = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-            InstallHooks();
-        });
-        
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        floatingButton.frame = CGRectMake(50, 200, 50, 50); floatingButton.layer.cornerRadius = 25;
-        floatingButton.clipsToBounds = YES;
-        floatingButton.backgroundColor = [UIColor colorWithRed:0.1 green:0.1 blue:0.1 alpha:0.85];
-        floatingButton.layer.borderColor = [UIColor greenColor].CGColor; floatingButton.layer.borderWidth = 2;
+        floatingButton.frame = CGRectMake(50, 200, 48, 48);
+        floatingButton.layer.cornerRadius = 24;
+        floatingButton.backgroundColor = [UIColor colorWithRed:0.05 green:0.08 blue:0.05 alpha:0.9];
+        floatingButton.layer.borderColor = NEON_GREEN.CGColor;
+        floatingButton.layer.borderWidth = 2;
+        AddGlow(floatingButton, NEON_GREEN, 12);
         [floatingButton setTitle:@"MC" forState:UIControlStateNormal];
-        [floatingButton setTitleColor:[UIColor greenColor] forState:UIControlStateNormal];
-        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        [floatingButton setTitleColor:NEON_GREEN forState:UIControlStateNormal];
+        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:12];
         [floatingButton addTarget:h action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:h action:@selector(drag:)];
         [floatingButton addGestureRecognizer:pan];
