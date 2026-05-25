@@ -2,12 +2,12 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <AVFoundation/AVFoundation.h>
+#import <dlfcn.h>
 
 // ========== НАСТРОЙКИ ==========
 static BOOL freeLookEnabled = NO;
 static BOOL showHatESP = NO;
 static BOOL hitColorEnabled = NO;
-static float hitColorR = 1.0, hitColorG = 0.0, hitColorB = 0.0;
 static float playerAlpha = 1.0;
 static float handX = 0.0, handY = 0.0, handZ = 0.0, handScale = 1.0;
 static int skyboxType = 0;
@@ -15,11 +15,18 @@ static int hitSoundType = 0;
 static BOOL menuVisible = NO;
 static UIButton *floatingButton = nil;
 static AVAudioPlayer *hitSoundPlayer = nil;
-static UIView *menuView = nil;
+static UILabel *fpsLabel = nil;
+static BOOL hooksFound = NO;
 
-// ========== НЕОНОВЫЕ ЦВЕТА ==========
+// ========== FPS ==========
+static CADisplayLink *displayLink = nil;
+static NSTimeInterval lastTime = 0;
+static int frameCount = 0;
+static float currentFPS = 60.0;
+
+// ========== ЦВЕТА ==========
 #define NEON_GREEN [UIColor colorWithRed:0.22 green:1.0 blue:0.08 alpha:1.0]
-#define DARK_BG [UIColor colorWithRed:0.05 green:0.08 blue:0.05 alpha:0.95]
+#define BLACK_BG [UIColor colorWithRed:0.04 green:0.04 blue:0.04 alpha:0.96]
 
 // ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
@@ -35,33 +42,82 @@ static UIWindow *GetKeyWindow(void) {
     return w;
 }
 
-static void AddGlow(UIView *view, UIColor *color, float radius) {
-    view.layer.shadowColor = color.CGColor;
-    view.layer.shadowOffset = CGSizeZero;
-    view.layer.shadowRadius = radius;
-    view.layer.shadowOpacity = 1.0;
-    view.layer.masksToBounds = NO;
+static void AddGlow(UIView *v, UIColor *c, float r) {
+    v.layer.shadowColor = c.CGColor;
+    v.layer.shadowOffset = CGSizeZero;
+    v.layer.shadowRadius = r;
+    v.layer.shadowOpacity = 1.0;
+    v.layer.masksToBounds = NO;
 }
 
 static void PlayHitSound(int type) {
-    NSString *soundName = nil;
-    switch (type) {
-        case 1: soundName = @"bell"; break;
-        case 2: soundName = @"pop"; break;
-        case 3: soundName = @"coin"; break;
-        default: return;
-    }
-    NSString *path = [NSString stringWithFormat:@"/System/Library/Audio/UISounds/%@.caf", soundName];
-    NSURL *url = [NSURL fileURLWithPath:path];
-    if (url) {
-        hitSoundPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:url error:nil];
-        [hitSoundPlayer play];
+    NSString *s = nil;
+    switch (type) { case 1: s = @"bell"; break; case 2: s = @"pop"; break; case 3: s = @"coin"; break; default: return; }
+    NSString *p = [NSString stringWithFormat:@"/System/Library/Audio/UISounds/%@.caf", s];
+    NSURL *u = [NSURL fileURLWithPath:p];
+    if (u) { hitSoundPlayer = [[AVAudioPlayer alloc] initWithContentsOfURL:u error:nil]; [hitSoundPlayer play]; }
+}
+
+static void UpdateFPSLabel(void) {
+    if (!lastTime) { lastTime = CACurrentMediaTime(); return; }
+    frameCount++;
+    NSTimeInterval now = CACurrentMediaTime();
+    NSTimeInterval delta = now - lastTime;
+    if (delta >= 0.5) {
+        currentFPS = frameCount / delta;
+        frameCount = 0; lastTime = now;
+        if (fpsLabel) dispatch_async(dispatch_get_main_queue(), ^{
+            fpsLabel.text = [NSString stringWithFormat:@"⚡%.0f", currentFPS];
+        });
     }
 }
 
-// ========== МЕНЮ С ПРОКРУТКОЙ ==========
+// ========== ПОИСК C++ СИМВОЛОВ ==========
+static void SearchCppSymbols(void) {
+    NSLog(@"[CREEPER] Searching C++ symbols...");
+    
+    // Пробуем найти через dlsym
+    void *handle = dlopen(NULL, RTLD_NOW);
+    if (!handle) { NSLog(@"[CREEPER] Cannot open main binary"); return; }
+    
+    // Ищем getAABB
+    void *getAABB_ptr = dlsym(handle, "_ZN5Actor7getAABBEv");
+    if (!getAABB_ptr) getAABB_ptr = dlsym(handle, "_ZNK5Actor7getAABBEv");
+    if (!getAABB_ptr) getAABB_ptr = dlsym(handle, "getAABB");
+    
+    if (getAABB_ptr) {
+        NSLog(@"[CREEPER] ✅ Found getAABB at %p", getAABB_ptr);
+        hooksFound = YES;
+    }
+    
+    // Ищем queueRenderEntities
+    void *render_ptr = dlsym(handle, "_ZN19LevelRendererCamera19queueRenderEntitiesERK36LevelRenderPreRenderUpdateParameters");
+    if (!render_ptr) render_ptr = dlsym(handle, "queueRenderEntities");
+    
+    if (render_ptr) {
+        NSLog(@"[CREEPER] ✅ Found queueRenderEntities at %p", render_ptr);
+        hooksFound = YES;
+    }
+    
+    // Ищем HitboxComponent
+    void *hitbox_ptr = dlsym(handle, "_ZN15HitboxComponent8getHitboxEv");
+    if (!hitbox_ptr) hitbox_ptr = dlsym(handle, "_ZNK15HitboxComponent8getHitboxEv");
+    if (!hitbox_ptr) hitbox_ptr = dlsym(handle, "getHitbox");
+    
+    if (hitbox_ptr) {
+        NSLog(@"[CREEPER] ✅ Found HitboxComponent::getHitbox at %p", hitbox_ptr);
+        hooksFound = YES;
+    }
+    
+    if (!hooksFound) {
+        NSLog(@"[CREEPER] ❌ No C++ symbols found (stripped binary)");
+    }
+}
+
+// ========== МЕНЮ (КОМПАКТНОЕ) ==========
 @interface CreeperMenuVC : UIViewController
-@property (nonatomic, strong) UIScrollView *scrollView;
+@property (nonatomic, strong) UIScrollView *sv;
+@property (nonatomic, strong) UILabel *fpsLbl;
 @end
 
 @implementation CreeperMenuVC
@@ -69,286 +125,99 @@ static void PlayHitSound(int type) {
 - (void)viewDidLoad {
     [super viewDidLoad];
     
-    float menuW = 290;
-    float menuH = 350; // Фиксированная высота с прокруткой
+    float mw = 310, mh = 280;
+    self.view.frame = CGRectMake(([UIScreen mainScreen].bounds.size.width-mw)/2, ([UIScreen mainScreen].bounds.size.height-mh)/2, mw, mh);
     
-    // Фон
-    UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(0, 0, menuW, menuH)];
-    bg.backgroundColor = DARK_BG;
-    bg.layer.cornerRadius = 18;
-    bg.layer.borderWidth = 2;
-    bg.layer.borderColor = NEON_GREEN.CGColor;
-    AddGlow(bg, NEON_GREEN, 15);
-    [self.view addSubview:bg];
+    UIView *bg = [[UIView alloc] initWithFrame:CGRectMake(0,0,mw,mh)];
+    bg.backgroundColor = BLACK_BG; bg.layer.cornerRadius = 16;
+    bg.layer.borderWidth = 2; bg.layer.borderColor = NEON_GREEN.CGColor;
+    AddGlow(bg, NEON_GREEN, 20); [self.view addSubview:bg];
     
-    float w = menuW - 30;
+    float w = mw - 24;
     
-    // ScrollView для контента
-    self.scrollView = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 70, menuW, menuH - 70)];
-    self.scrollView.showsVerticalScrollIndicator = YES;
-    self.scrollView.indicatorStyle = UIScrollViewIndicatorStyleWhite;
-    [bg addSubview:self.scrollView];
+    UIView *hdr = [[UIView alloc] initWithFrame:CGRectMake(12,10,w,44)];
+    hdr.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.12]; hdr.layer.cornerRadius = 10;
+    AddGlow(hdr, NEON_GREEN, 4); [bg addSubview:hdr];
     
-    // Header (фиксированный поверх скролла)
-    UIView *header = [[UIView alloc] initWithFrame:CGRectMake(15, 15, w, 50)];
-    header.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.15];
-    header.layer.cornerRadius = 12;
-    AddGlow(header, NEON_GREEN, 5);
-    [bg addSubview:header];
+    UILabel *ico = [[UILabel alloc] initWithFrame:CGRectMake(8,7,30,30)];
+    ico.text = @"☠️"; ico.font = [UIFont systemFontOfSize:22]; [hdr addSubview:ico];
     
-    UILabel *icon = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, 34, 34)];
-    icon.text = @"☠️";
-    icon.font = [UIFont systemFontOfSize:26];
-    [header addSubview:icon];
+    UILabel *ttl = [[UILabel alloc] initWithFrame:CGRectMake(40,4,w-110,20)];
+    ttl.text = @"CREEPER VISUAL"; ttl.textColor = NEON_GREEN;
+    ttl.font = [UIFont boldSystemFontOfSize:15]; AddGlow(ttl, NEON_GREEN, 2); [hdr addSubview:ttl];
     
-    UILabel *title = [[UILabel alloc] initWithFrame:CGRectMake(48, 5, w - 100, 22)];
-    title.text = @"CREEPER VISUAL";
-    title.textColor = NEON_GREEN;
-    title.font = [UIFont boldSystemFontOfSize:17];
-    AddGlow(title, NEON_GREEN, 3);
-    [header addSubview:title];
+    self.fpsLbl = [[UILabel alloc] initWithFrame:CGRectMake(w-70,8,60,24)];
+    self.fpsLbl.text = @"⚡60"; self.fpsLbl.textColor = NEON_GREEN;
+    self.fpsLbl.font = [UIFont boldSystemFontOfSize:13]; self.fpsLbl.textAlignment = NSTextAlignmentRight;
+    AddGlow(self.fpsLbl, NEON_GREEN, 2); [hdr addSubview:self.fpsLbl];
+    fpsLabel = self.fpsLbl;
     
-    UILabel *ver = [[UILabel alloc] initWithFrame:CGRectMake(48, 27, 80, 16)];
-    ver.text = @"v1.0 BETA";
-    ver.textColor = [NEON_GREEN colorWithAlphaComponent:0.7];
-    ver.font = [UIFont systemFontOfSize:10];
-    [header addSubview:ver];
+    self.sv = [[UIScrollView alloc] initWithFrame:CGRectMake(0,60,mw,mh-60)]; [bg addSubview:self.sv];
     
-    UILabel *fps = [[UILabel alloc] initWithFrame:CGRectMake(w - 75, 12, 65, 26)];
-    fps.text = @"⚡60 FPS";
-    fps.textColor = NEON_GREEN;
-    fps.font = [UIFont boldSystemFontOfSize:13];
-    fps.textAlignment = NSTextAlignmentRight;
-    AddGlow(fps, NEON_GREEN, 2);
-    [header addSubview:fps];
+    float cy = 4;
+    cy = [self sec:@"🎨 VISUALS" y:cy w:w];
+    cy = [self sw:@"Free Look (360°)" y:cy w:w tag:1];
+    cy = [self sw:@"Hat ESP" y:cy w:w tag:2];
+    cy = [self sw:@"Hit Color" y:cy w:w tag:3];
+    cy = [self sec:@"🌅 SKYBOX" y:cy w:w];
+    cy = [self seg:@[@"Day",@"Sunset",@"Night",@"Custom"] y:cy w:w tag:10 sel:skyboxType];
+    cy = [self sec:@"🔊 HIT SOUND" y:cy w:w];
+    cy = [self seg:@[@"Default",@"Bell",@"Pop",@"Coin"] y:cy w:w tag:20 sel:hitSoundType];
+    cy = [self sec:@"✋ HAND" y:cy w:w];
+    cy = [self sl:@"X" y:cy w:w tag:100 val:handX min:-2 max:2];
+    cy = [self sl:@"Y" y:cy w:w tag:101 val:handY min:-2 max:2];
+    cy = [self sl:@"Z" y:cy w:w tag:102 val:handZ min:-2 max:2];
+    cy = [self sl:@"Scl" y:cy w:w tag:103 val:handScale min:0.5 max:3];
+    cy = [self sec:@"👤 PLAYER" y:cy w:w];
+    cy = [self sl:@"Alpha" y:cy w:w tag:200 val:playerAlpha min:0 max:1];
     
-    // Строим контент внутри scrollView
-    float cy = 5;
-    
-    cy = [self addSectionTitle:@"🎨 VISUALS" y:cy w:w];
-    cy = [self addSwitch:@"Free Look (360°)" y:cy w:w tag:1];
-    cy = [self addSwitch:@"Hat ESP" y:cy w:w tag:2];
-    cy = [self addSwitch:@"Hit Color" y:cy w:w tag:3];
-    
-    cy = [self addSectionTitle:@"🌅 SKYBOX" y:cy w:w];
-    cy = [self addSegment:@[@"Day", @"Sunset", @"Night", @"Custom"] y:cy w:w tag:10 selected:skyboxType];
-    
-    cy = [self addSectionTitle:@"🔊 HIT SOUND" y:cy w:w];
-    cy = [self addSegment:@[@"Default", @"Bell", @"Pop", @"Coin"] y:cy w:w tag:20 selected:hitSoundType];
-    
-    cy = [self addSectionTitle:@"✋ HAND POSITION" y:cy w:w];
-    cy = [self addSlider:@"X" y:cy w:w tag:100 value:handX min:-2 max:2];
-    cy = [self addSlider:@"Y" y:cy w:w tag:101 value:handY min:-2 max:2];
-    cy = [self addSlider:@"Z" y:cy w:w tag:102 value:handZ min:-2 max:2];
-    cy = [self addSlider:@"Scale" y:cy w:w tag:103 value:handScale min:0.5 max:3];
-    
-    cy = [self addSectionTitle:@"👤 PLAYER" y:cy w:w];
-    cy = [self addSlider:@"Alpha" y:cy w:w tag:200 value:playerAlpha min:0 max:1];
-    
-    // Кнопка закрытия
-    UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
-    close.frame = CGRectMake(5, cy + 10, w - 10, 38);
-    close.backgroundColor = NEON_GREEN;
-    [close setTitle:@"✕ CLOSE" forState:UIControlStateNormal];
-    [close setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
-    close.titleLabel.font = [UIFont boldSystemFontOfSize:14];
-    close.layer.cornerRadius = 10;
-    AddGlow(close, NEON_GREEN, 10);
-    [close addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
-    [self.scrollView addSubview:close];
-    cy += 55;
-    
-    self.scrollView.contentSize = CGSizeMake(w, cy);
+    UIButton *cls = [UIButton buttonWithType:UIButtonTypeCustom];
+    cls.frame = CGRectMake(8,cy+6,w-16,34); cls.backgroundColor = NEON_GREEN;
+    [cls setTitle:hooksFound ? @"✕ CLOSE (HOOKS OK)" : @"✕ CLOSE" forState:UIControlStateNormal];
+    [cls setTitleColor:[UIColor blackColor] forState:UIControlStateNormal];
+    cls.titleLabel.font = [UIFont boldSystemFontOfSize:13]; cls.layer.cornerRadius = 8;
+    AddGlow(cls, NEON_GREEN, 8);
+    [cls addTarget:self action:@selector(closeMenu) forControlEvents:UIControlEventTouchUpInside];
+    [self.sv addSubview:cls];
+    self.sv.contentSize = CGSizeMake(w, cy+50);
 }
 
-- (float)addSectionTitle:(NSString *)title y:(float)y w:(float)w {
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(5, y, w, 22)];
-    lbl.text = title;
-    lbl.textColor = NEON_GREEN;
-    lbl.font = [UIFont boldSystemFontOfSize:13];
-    AddGlow(lbl, NEON_GREEN, 2);
-    [self.scrollView addSubview:lbl];
-    return y + 26;
-}
-
-- (float)addSwitch:(NSString *)name y:(float)y w:(float)w tag:(int)tag {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(5, y, w, 32)];
-    row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
-    row.layer.cornerRadius = 8;
-    [self.scrollView addSubview:row];
-    
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 6, 170, 20)];
-    lbl.text = name;
-    lbl.textColor = [UIColor whiteColor];
-    lbl.font = [UIFont systemFontOfSize:13];
-    [row addSubview:lbl];
-    
-    UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(w - 55, 1, 45, 30)];
-    sw.onTintColor = NEON_GREEN;
-    sw.tag = tag;
-    [sw addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-    [row addSubview:sw];
-    
-    return y + 36;
-}
-
-- (float)addSlider:(NSString *)name y:(float)y w:(float)w tag:(int)tag value:(float)val min:(float)min max:(float)max {
-    UIView *row = [[UIView alloc] initWithFrame:CGRectMake(5, y, w, 36)];
-    row.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.05];
-    row.layer.cornerRadius = 8;
-    [self.scrollView addSubview:row];
-    
-    UILabel *lbl = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, 40, 20)];
-    lbl.text = name;
-    lbl.textColor = NEON_GREEN;
-    lbl.font = [UIFont boldSystemFontOfSize:11];
-    [row addSubview:lbl];
-    
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(50, 6, w - 65, 24)];
-    sl.minimumValue = min;
-    sl.maximumValue = max;
-    sl.value = val;
-    sl.minimumTrackTintColor = NEON_GREEN;
-    sl.thumbTintColor = NEON_GREEN;
-    sl.tag = tag;
-    [sl addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-    AddGlow(sl, NEON_GREEN, 3);
-    [row addSubview:sl];
-    
-    return y + 40;
-}
-
-- (float)addSegment:(NSArray *)items y:(float)y w:(float)w tag:(int)tag selected:(int)sel {
-    UISegmentedControl *seg = [[UISegmentedControl alloc] initWithItems:items];
-    seg.frame = CGRectMake(5, y, w, 32);
-    seg.selectedSegmentIndex = sel;
-    seg.tag = tag;
-    [seg addTarget:self action:@selector(segmentChanged:) forControlEvents:UIControlEventValueChanged];
-    if (@available(iOS 13.0, *)) {
-        seg.selectedSegmentTintColor = NEON_GREEN;
-    }
-    [self.scrollView addSubview:seg];
-    return y + 38;
-}
-
-- (void)switchChanged:(UISwitch *)sw {
-    switch (sw.tag) {
-        case 1: freeLookEnabled = sw.isOn; break;
-        case 2: showHatESP = sw.isOn; break;
-        case 3: hitColorEnabled = sw.isOn; break;
-    }
-}
-
-- (void)sliderChanged:(UISlider *)sl {
-    switch (sl.tag) {
-        case 100: handX = sl.value; break;
-        case 101: handY = sl.value; break;
-        case 102: handZ = sl.value; break;
-        case 103: handScale = sl.value; break;
-        case 200: playerAlpha = sl.value; break;
-    }
-}
-
-- (void)segmentChanged:(UISegmentedControl *)seg {
-    if (seg.tag == 10) skyboxType = (int)seg.selectedSegmentIndex;
-    else if (seg.tag == 20) {
-        hitSoundType = (int)seg.selectedSegmentIndex;
-        PlayHitSound(hitSoundType);
-    }
-}
-
-- (void)closeMenu {
-    menuVisible = NO;
-    [UIView animateWithDuration:0.2 animations:^{
-        self.view.alpha = 0;
-    } completion:^(BOOL f) {
-        [self.view removeFromSuperview];
-        menuView = nil;
-    }];
-}
-
+- (float)sec:(NSString *)t y:(float)y w:(float)w { UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(4,y,w,20)]; l.text = t; l.textColor = NEON_GREEN; l.font = [UIFont boldSystemFontOfSize:12]; AddGlow(l, NEON_GREEN, 2); [self.sv addSubview:l]; return y+22; }
+- (float)sw:(NSString *)n y:(float)y w:(float)w tag:(int)tag { UIView *r = [[UIView alloc] initWithFrame:CGRectMake(4,y,w,28)]; r.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.04]; r.layer.cornerRadius = 6; [self.sv addSubview:r]; UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8,4,180,20)]; l.text = n; l.textColor = [UIColor whiteColor]; l.font = [UIFont systemFontOfSize:12]; [r addSubview:l]; UISwitch *sw = [[UISwitch alloc] initWithFrame:CGRectMake(w-50,0,42,28)]; sw.onTintColor = NEON_GREEN; sw.tag = tag; [sw addTarget:self action:@selector(swCh:) forControlEvents:UIControlEventValueChanged]; [r addSubview:sw]; return y+32; }
+- (float)sl:(NSString *)n y:(float)y w:(float)w tag:(int)tag val:(float)v min:(float)mn max:(float)mx { UIView *r = [[UIView alloc] initWithFrame:CGRectMake(4,y,w,30)]; r.backgroundColor = [NEON_GREEN colorWithAlphaComponent:0.04]; r.layer.cornerRadius = 6; [self.sv addSubview:r]; UILabel *l = [[UILabel alloc] initWithFrame:CGRectMake(8,6,30,18)]; l.text = n; l.textColor = NEON_GREEN; l.font = [UIFont boldSystemFontOfSize:10]; [r addSubview:l]; UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(40,4,w-52,22)]; sl.minimumValue = mn; sl.maximumValue = mx; sl.value = v; sl.minimumTrackTintColor = NEON_GREEN; sl.thumbTintColor = NEON_GREEN; sl.tag = tag; [sl addTarget:self action:@selector(slCh:) forControlEvents:UIControlEventValueChanged]; [r addSubview:sl]; return y+34; }
+- (float)seg:(NSArray *)it y:(float)y w:(float)w tag:(int)tag sel:(int)sel { UISegmentedControl *sg = [[UISegmentedControl alloc] initWithItems:it]; sg.frame = CGRectMake(4,y,w,28); sg.selectedSegmentIndex = sel; sg.tag = tag; [sg addTarget:self action:@selector(sgCh:) forControlEvents:UIControlEventValueChanged]; if (@available(iOS 13.0, *)) sg.selectedSegmentTintColor = NEON_GREEN; [self.sv addSubview:sg]; return y+32; }
+- (void)swCh:(UISwitch *)s { if (s.tag==1) freeLookEnabled=s.isOn; else if (s.tag==2) showHatESP=s.isOn; else if (s.tag==3) hitColorEnabled=s.isOn; }
+- (void)slCh:(UISlider *)s { if (s.tag==100) handX=s.value; else if (s.tag==101) handY=s.value; else if (s.tag==102) handZ=s.value; else if (s.tag==103) handScale=s.value; else if (s.tag==200) playerAlpha=s.value; }
+- (void)sgCh:(UISegmentedControl *)s { if (s.tag==10) skyboxType=(int)s.selectedSegmentIndex; else if (s.tag==20) { hitSoundType=(int)s.selectedSegmentIndex; PlayHitSound(hitSoundType); } }
+- (void)closeMenu { menuVisible = NO; [UIView animateWithDuration:0.15 animations:^{ self.view.alpha = 0; } completion:^(BOOL f) { [self.view removeFromSuperview]; }]; }
 @end
 
-// ========== КНОПКА (ПЕРЕМЕЩАЕМАЯ) ==========
-@interface Handler : NSObject
-@property (nonatomic, strong) CreeperMenuVC *menuVC;
-@end
-
+@interface Handler : NSObject @end
 @implementation Handler
-
-- (void)drag:(UIPanGestureRecognizer *)g {
-    UIView *v = g.view;
-    CGPoint t = [g translationInView:v.superview];
-    if (g.state == UIGestureRecognizerStateChanged) {
-        CGPoint c = CGPointMake(v.center.x+t.x, v.center.y+t.y);
-        CGRect b = [UIScreen mainScreen].bounds;
-        c.x = MAX(30, MIN(b.size.width-30, c.x));
-        c.y = MAX(50, MIN(b.size.height-50, c.y));
-        v.center = c;
-        
-        // Двигаем меню вместе с кнопкой
-        if (menuView) {
-            menuView.center = c;
-        }
-        
-        [g setTranslation:CGPointZero inView:v.superview];
-    }
-}
-
-- (void)tap {
-    if (menuVisible) {
-        // Закрыть меню
-        [self.menuVC closeMenu];
-        return;
-    }
-    
-    menuVisible = YES;
-    self.menuVC = [[CreeperMenuVC alloc] init];
-    
-    float menuW = 290;
-    float menuH = 350;
-    UIButton *btn = floatingButton;
-    
-    // Позиция меню рядом с кнопкой
-    float mx = btn.center.x - menuW/2;
-    float my = btn.center.y - menuH - 20;
-    
-    // Не даём уйти за экран
-    CGRect screen = [UIScreen mainScreen].bounds;
-    if (mx < 10) mx = 10;
-    if (mx + menuW > screen.size.width - 10) mx = screen.size.width - menuW - 10;
-    if (my < 50) my = btn.center.y + 60;
-    
-    self.menuVC.view.frame = CGRectMake(mx, my, menuW, menuH);
-    self.menuVC.view.backgroundColor = [UIColor clearColor];
-    menuView = self.menuVC.view;
-    
-    UIWindow *w = GetKeyWindow();
-    if (w) {
-        self.menuVC.view.alpha = 0;
-        [w addSubview:self.menuVC.view];
-        [UIView animateWithDuration:0.25 animations:^{
-            self.menuVC.view.alpha = 1;
-        }];
-    }
-}
-
+- (void)drag:(UIPanGestureRecognizer *)g { UIView *v=g.view; CGPoint t=[g translationInView:v.superview]; if (g.state==UIGestureRecognizerStateChanged) { CGPoint c=CGPointMake(v.center.x+t.x, v.center.y+t.y); CGRect b=[UIScreen mainScreen].bounds; c.x=MAX(30,MIN(b.size.width-30,c.x)); c.y=MAX(50,MIN(b.size.height-50,c.y)); v.center=c; [g setTranslation:CGPointZero inView:v.superview]; } }
+- (void)tap { if (menuVisible) { for (UIView *v in GetKeyWindow().subviews) if ([v.nextResponder isKindOfClass:[CreeperMenuVC class]]) [(CreeperMenuVC *)v.nextResponder closeMenu]; return; } menuVisible=YES; CreeperMenuVC *m=[[CreeperMenuVC alloc] init]; m.view.alpha=0; UIWindow *w=GetKeyWindow(); if (w) { [w addSubview:m.view]; [UIView animateWithDuration:0.2 animations:^{ m.view.alpha=1; }]; } }
 @end
 
 static Handler *h = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
+        // Поиск C++ символов через 5 секунд после запуска
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            SearchCppSymbols();
+        });
+        
+        displayLink = [CADisplayLink displayLinkWithTarget:[[NSObject alloc] init] selector:@selector(UpdateFPSLabel)];
+        [displayLink addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
-        floatingButton.frame = CGRectMake(50, 200, 48, 48);
-        floatingButton.layer.cornerRadius = 24;
-        floatingButton.backgroundColor = [UIColor colorWithRed:0.05 green:0.08 blue:0.05 alpha:0.9];
-        floatingButton.layer.borderColor = NEON_GREEN.CGColor;
-        floatingButton.layer.borderWidth = 2;
-        AddGlow(floatingButton, NEON_GREEN, 12);
+        floatingButton.frame = CGRectMake(50,200,46,46); floatingButton.layer.cornerRadius=23;
+        floatingButton.backgroundColor = [UIColor colorWithRed:0.04 green:0.04 blue:0.04 alpha:0.9];
+        floatingButton.layer.borderColor = NEON_GREEN.CGColor; floatingButton.layer.borderWidth=2;
+        AddGlow(floatingButton, NEON_GREEN, 15);
         [floatingButton setTitle:@"MC" forState:UIControlStateNormal];
         [floatingButton setTitleColor:NEON_GREEN forState:UIControlStateNormal];
-        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:12];
+        floatingButton.titleLabel.font = [UIFont boldSystemFontOfSize:11];
         [floatingButton addTarget:h action:@selector(tap) forControlEvents:UIControlEventTouchUpInside];
         UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:h action:@selector(drag:)];
         [floatingButton addGestureRecognizer:pan];
