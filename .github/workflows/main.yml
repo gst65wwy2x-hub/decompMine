@@ -17,13 +17,54 @@ jobs:
         chmod +x /usr/local/bin/class-dump
         echo "class-dump установлен!"
 
-    - name: Скачиваем IPA
+    - name: Получаем список файлов в релизе
       run: |
-        echo "Скачиваю IPA..."
-        wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa" || {
-          echo "Ошибка скачивания!"
+        echo "=== Получаем информацию о релизе ==="
+        curl -L -H "Accept: application/json" \
+          "https://api.github.com/repos/gst65wwy2x-hub/decompMine/releases/tags/v1.0" \
+          -o release_info.json
+        
+        echo "=== Файлы в релизе ==="
+        python3 -c "
+import json
+with open('release_info.json') as f:
+    data = json.load(f)
+    for asset in data.get('assets', []):
+        print(f'Имя: {asset[\"name\"]}')
+        print(f'URL: {asset[\"browser_download_url\"]}')
+        print('---')
+        "
+
+    - name: Скачиваем IPA (авто-поиск)
+      run: |
+        echo "Пробую скачать IPA..."
+        
+        # Получаем прямую ссылку из JSON
+        DOWNLOAD_URL=$(python3 -c "
+import json
+with open('release_info.json') as f:
+    data = json.load(f)
+    for asset in data.get('assets', []):
+        if '.ipa' in asset['name'].lower():
+            print(asset['browser_download_url'])
+            break
+        ")
+        
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "IPA не найден в релизе!"
+          echo "Доступные файлы:"
+          python3 -c "
+import json
+with open('release_info.json') as f:
+    data = json.load(f)
+    for asset in data.get('assets', []):
+        print(f'  - {asset[\"name\"]}')
+          "
           exit 1
-        }
+        fi
+        
+        echo "Найден IPA: $DOWNLOAD_URL"
+        wget -O mcpe.ipa "$DOWNLOAD_URL" || exit 1
         echo "IPA скачан!"
         ls -lh mcpe.ipa
 
@@ -44,12 +85,7 @@ jobs:
         
         echo "Анализирую бинарник: $BINARY"
         mkdir -p ../../../headers/
-        class-dump "$BINARY" > ../../../headers_raw.txt 2>&1 || {
-          echo "class-dump не сработал, пробую dsdump..."
-          curl -L -o /usr/local/bin/dsdump https://github.com/DerekSelander/dsdump/raw/master/dsdump
-          chmod +x /usr/local/bin/dsdump
-          dsdump "$BINARY" --objc > ../../../headers_raw.txt 2>&1
-        }
+        class-dump "$BINARY" > ../../../headers_raw.txt 2>&1
         echo "=== Анализ завершён ==="
         echo "Строк в дампе:"
         wc -l ../../../headers_raw.txt
@@ -70,9 +106,6 @@ jobs:
         echo ""
         echo "=== Классы Level/Chunk/Block ==="
         grep -i "interface.*level\|interface.*chunk\|interface.*block\|interface.*world" headers_raw.txt | head -30
-        echo ""
-        echo "=== Классы Minecraft ==="
-        grep -i "interface.*minecraft\|interface.*mcpe\|interface.*bedrock" headers_raw.txt | head -20
 
     - name: Upload Headers
       uses: actions/upload-artifact@v4
