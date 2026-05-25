@@ -1,4 +1,4 @@
-name: Build Dylib
+name: Inject Dylib into IPA
 
 on:
   push:
@@ -13,12 +13,38 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
+    - name: Install Tools
+      run: |
+        brew install dpkg ldid
+
     - name: Compile Dylib
       run: |
         clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics Tweak.mm -o MinecraftCheat.dylib
+        echo "Dylib compiled!"
 
-    - name: Upload Dylib
+    - name: Download Original IPA
+      run: |
+        curl -L -o original.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/ТВОЙ_ФАЙЛ.ipa"
+
+    - name: Inject Dylib into IPA
+      run: |
+        # Распаковываем
+        unzip original.ipa -d ipa_contents
+        cd ipa_contents/Payload/*.app
+        
+        # Копируем dylib
+        cp $GITHUB_WORKSPACE/MinecraftCheat.dylib .
+        
+        # Вставляем загрузку dylib в бинарник
+        BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        install_name_tool -change /usr/lib/libSystem.B.dylib @executable_path/MinecraftCheat.dylib "$BINARY" || true
+        
+        # Пакуем обратно
+        cd $GITHUB_WORKSPACE/ipa_contents
+        zip -r $GITHUB_WORKSPACE/MinecraftCheat.ipa Payload/
+
+    - name: Upload Patched IPA
       uses: actions/upload-artifact@v4
       with:
-        name: MinecraftCheat-Dylib
-        path: MinecraftCheat.dylib
+        name: MinecraftCheat-IPA
+        path: MinecraftCheat.ipa
