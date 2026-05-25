@@ -90,8 +90,14 @@ static void PlayHitSound(int type) {
 static void SearchHooks(void) {
     void *h = dlopen(NULL, RTLD_NOW);
     if (!h) return;
-    real_getAABB = (void *(*)(void *))dlsym(h, "getAABB");
+    
+    real_getAABB = (void *(*)(void *))dlsym(h, "_ZN5Actor7getAABBEv");
+    if (!real_getAABB) real_getAABB = (void *(*)(void *))dlsym(h, "_ZNK5Actor7getAABBEv");
+    if (!real_getAABB) real_getAABB = (void *(*)(void *))dlsym(h, "_ZN15HitboxComponent8getHitboxEv");
+    if (!real_getAABB) real_getAABB = (void *(*)(void *))dlsym(h, "getAABB");
+    
     if (real_getAABB) hooksReady = YES;
+    
     if (statusLabel) dispatch_async(dispatch_get_main_queue(), ^{
         statusLabel.text = hooksReady ? @"✅ HOOKS" : @"❌ NO HOOKS";
         statusLabel.textColor = hooksReady ? NEON_GREEN : [UIColor redColor];
