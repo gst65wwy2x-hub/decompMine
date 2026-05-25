@@ -1,0 +1,41 @@
+name: Find Hooks in Strings
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+    - name: Download and Search
+      run: |
+        curl -L -o strings.txt "https://github.com/gst65wwy2x-hub/decompMine/releases/download/July/strings.txt"
+        echo "=== Actor ==="
+        grep -i "actor" strings.txt | head -30
+        echo "=== Player ==="
+        grep -i "player" strings.txt | head -30
+        echo "=== getAABB ==="
+        grep -i "getAABB" strings.txt | head -20
+        echo "=== getHitbox ==="
+        grep -i "getHitbox" strings.txt | head -20
+        echo "=== renderEntities ==="
+        grep -i "renderEntities" strings.txt | head -20
+        echo "=== LevelRenderer ==="
+        grep -i "LevelRenderer" strings.txt | head -20
+        echo "=== GameMode ==="
+        grep -i "GameMode" strings.txt | head -20
+        echo "=== LocalPlayer ==="
+        grep -i "LocalPlayer" strings.txt | head -20
+        echo "=== getPosition ==="
+        grep -i "getPosition" strings.txt | head -20
+        echo "=== getName ==="
+        grep -i "getName" strings.txt | head -20
+        echo "=== BlockSource ==="
+        grep -i "BlockSource" strings.txt | head -20
+        echo "=== getBlock ==="
+        grep -i "getBlock" strings.txt | head -20
+        echo "=== Chunk ==="
+        grep -i "chunk" strings.txt | head -20
+        echo "=== Entity ==="
+        grep -i "entity" strings.txt | head -20
