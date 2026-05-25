@@ -6,9 +6,20 @@
 static UIButton *floatingButton = nil;
 static BOOL menuVisible = NO;
 static BOOL hitboxesEnabled = NO;
+static BOOL playerESPEnabled = NO;
+static BOOL blockESPEnabled = NO;
 static float hitboxScale = 1.0;
+static int chunkLoadRadius = 4;
 static NSMutableArray *friendsList = nil;
-static IMP orig_getAABB = NULL;
+
+// ========== СТРУКТУРЫ MCPE ==========
+typedef struct { float x, y, z; } Vec3;
+typedef struct { float minX, minY, minZ, maxX, maxY, maxZ; } AABB;
+
+// ========== ОРИГИНАЛЫ ХУКОВ ==========
+static IMP orig_Actor_getAABB = NULL;
+static IMP orig_LevelRenderer_renderEntities = NULL;
+static IMP orig_GameMode_attack = NULL;
 
 // ========== ФУНКЦИИ ==========
 static UIWindow *GetKeyWindow(void) {
@@ -24,58 +35,147 @@ static UIWindow *GetKeyWindow(void) {
     return w;
 }
 
-// ========== ХУК ХИТБОКСОВ ==========
-static void *hooked_getAABB(id self, SEL _cmd) {
-    typedef void *(*F)(id, SEL);
-    F orig = (F)orig_getAABB;
-    if (!hitboxesEnabled || !orig) return orig(self, _cmd);
+// ========== ХУК: Actor::getAABB (ХИТБОКСЫ) ==========
+static AABB hooked_Actor_getAABB(id self, SEL _cmd) {
+    typedef AABB (*Original)(id, SEL);
+    Original orig = (Original)orig_Actor_getAABB;
+    AABB box = orig ? orig(self, _cmd) : (AABB){0};
     
-    // Пропускаем друзей
-    NSString *name = nil;
-    if ([self respondsToSelector:NSSelectorFromString(@"getName")])
-        name = [self performSelector:NSSelectorFromString(@"getName")];
-    if (name && [friendsList containsObject:name]) return orig(self, _cmd);
+    if (!hitboxesEnabled || !orig) return box;
     
-    // Меняем хитбокс
-    float *box = (float *)orig(self, _cmd);
-    if (!box) return NULL;
+    // Проверка на друга
+    if ([self respondsToSelector:NSSelectorFromString(@"getName")]) {
+        NSString *name = [self performSelector:NSSelectorFromString(@"getName")];
+        if (name && [friendsList containsObject:name]) return box;
+    }
+    if ([self respondsToSelector:NSSelectorFromString(@"getPlayerName")]) {
+        NSString *name = [self performSelector:NSSelectorFromString(@"getPlayerName")];
+        if (name && [friendsList containsObject:name]) return box;
+    }
     
-    @try {
-        float cx = (box[0]+box[3])/2, cy = (box[1]+box[4])/2, cz = (box[2]+box[5])/2;
-        float hx = (box[3]-box[0])/2*hitboxScale, hy = (box[4]-box[1])/2*hitboxScale, hz = (box[5]-box[2])/2*hitboxScale;
-        box[0]=cx-hx; box[3]=cx+hx; box[1]=cy-hy; box[4]=cy+hy; box[2]=cz-hz; box[5]=cz+hz;
-    } @catch (NSException *e) {}
+    // Увеличиваем хитбокс
+    float cx = (box.minX + box.maxX) / 2;
+    float cy = (box.minY + box.maxY) / 2;
+    float cz = (box.minZ + box.maxZ) / 2;
+    float hx = (box.maxX - box.minX) / 2 * hitboxScale;
+    float hy = (box.maxY - box.minY) / 2 * hitboxScale;
+    float hz = (box.maxZ - box.minZ) / 2 * hitboxScale;
+    
+    box.minX = cx - hx; box.maxX = cx + hx;
+    box.minY = cy - hy; box.maxY = cy + hy;
+    box.minZ = cz - hz; box.maxZ = cz + hz;
     
     return box;
 }
 
-// ========== АВТО-УСТАНОВКА ХУКОВ ==========
-static void InstallHooks(void) {
-    NSArray *classes = @[@"Actor", @"Entity", @"Mob", @"Player", @"ServerPlayer", @"LocalPlayer"];
-    NSArray *methods = @[@"getAABB", @"getBoundingBox", @"getHitbox", @"aabb", @"getCollisionBox"];
+// ========== ХУК: LevelRenderer::renderEntities (ESP) ==========
+static void hooked_LevelRenderer_renderEntities(id self, SEL _cmd, void *entities, void *camera) {
+    typedef void (*Original)(id, SEL, void *, void *);
+    Original orig = (Original)orig_LevelRenderer_renderEntities;
     
-    for (NSString *c in classes) {
-        for (NSString *m in methods) {
-            Class cls = NSClassFromString(c);
-            if (!cls) continue;
-            SEL sel = NSSelectorFromString(m);
-            Method meth = class_getInstanceMethod(cls, sel);
-            if (!meth) meth = class_getClassMethod(cls, sel);
-            if (!meth) continue;
-            orig_getAABB = method_getImplementation(meth);
-            method_setImplementation(meth, (IMP)hooked_getAABB);
-            NSLog(@"[MCPE] Хук установлен: %@::%@", c, m);
+    // Сначала оригинальный рендер
+    if (orig) orig(self, _cmd, entities, camera);
+    
+    // ESP игроков
+    if (playerESPEnabled) {
+        id level = nil;
+        if ([self respondsToSelector:NSSelectorFromString(@"getLevel")])
+            level = [self performSelector:NSSelectorFromString(@"getLevel")];
+        
+        if (level && [level respondsToSelector:NSSelectorFromString(@"getPlayers")]) {
+            NSArray *players = [level performSelector:NSSelectorFromString(@"getPlayers")];
+            for (id player in players) {
+                // Пропускаем друзей
+                NSString *name = nil;
+                if ([player respondsToSelector:NSSelectorFromString(@"getName")])
+                    name = [player performSelector:NSSelectorFromString(@"getName")];
+                if (name && [friendsList containsObject:name]) continue;
+                
+                // Получаем позицию и рисуем ESP
+                if ([player respondsToSelector:NSSelectorFromString(@"getPosition")]) {
+                    Vec3 *pos = (Vec3 *)[[player performSelector:NSSelectorFromString(@"getPosition")] bytes];
+                    if (pos) {
+                        // ESP box через dispatch_async на главный поток
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            // Упрощённый ESP (в реальности нужен WorldToScreen)
+                            UIView *esp = [[UIView alloc] initWithFrame:CGRectMake(100, 100, 50*hitboxScale, 50*hitboxScale)];
+                            esp.layer.borderColor = [UIColor redColor].CGColor;
+                            esp.layer.borderWidth = 2;
+                            esp.tag = 7777;
+                            UIWindow *w = GetKeyWindow();
+                            if (w) {
+                                for (UIView *v in w.subviews) if (v.tag == 7777) [v removeFromSuperview];
+                                [w addSubview:esp];
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ========== УСТАНОВКА ХУКОВ ==========
+static void InstallHooks(void) {
+    NSLog(@"[MCPE] Installing hooks...");
+    
+    // 1. Actor::getAABB
+    NSArray *actorClasses = @[@"Actor", @"Mob", @"Player", @"ServerPlayer", @"LocalPlayer", 
+                              @"Entity", @"LivingEntity", @"Monster", @"Animal"];
+    NSArray *aabbMethods = @[@"getAABB", @"getBoundingBox", @"getHitbox", @"aabb", 
+                             @"getCollisionBox", @"getBounds", @"boundingBox"];
+    
+    for (NSString *clsName in actorClasses) {
+        Class cls = NSClassFromString(clsName);
+        if (!cls) continue;
+        
+        for (NSString *mtdName in aabbMethods) {
+            SEL sel = NSSelectorFromString(mtdName);
+            Method method = class_getInstanceMethod(cls, sel);
+            if (!method) method = class_getClassMethod(cls, sel);
+            if (!method) continue;
+            
+            orig_Actor_getAABB = method_getImplementation(method);
+            method_setImplementation(method, (IMP)hooked_Actor_getAABB);
+            NSLog(@"[MCPE] Hooked: %@::%@", clsName, mtdName);
+            goto hook2;
+        }
+    }
+    
+hook2:
+    // 2. LevelRenderer::renderEntities
+    NSArray *rendererClasses = @[@"LevelRenderer", @"WorldRenderer", @"GameRenderer", 
+                                 @"RenderLayer", @"MinecraftRenderer"];
+    NSArray *renderMethods = @[@"renderEntities:camera:", @"renderEntities:", 
+                               @"renderPlayers:", @"onRender:", @"render:"];
+    
+    for (NSString *clsName in rendererClasses) {
+        Class cls = NSClassFromString(clsName);
+        if (!cls) continue;
+        
+        for (NSString *mtdName in renderMethods) {
+            SEL sel = NSSelectorFromString(mtdName);
+            Method method = class_getInstanceMethod(cls, sel);
+            if (!method) continue;
+            
+            orig_LevelRenderer_renderEntities = method_getImplementation(method);
+            method_setImplementation(method, (IMP)hooked_LevelRenderer_renderEntities);
+            NSLog(@"[MCPE] Hooked: %@::%@", clsName, mtdName);
             return;
         }
     }
-    NSLog(@"[MCPE] Хуки не найдены");
+    
+    NSLog(@"[MCPE] Hooks installed: AABB=%d Render=%d", 
+          orig_Actor_getAABB != NULL, 
+          orig_LevelRenderer_renderEntities != NULL);
 }
 
 // ========== МЕНЮ ==========
 @interface MenuVC : UIViewController <UITableViewDelegate, UITableViewDataSource, UITextFieldDelegate>
 @property (nonatomic, strong) UITableView *tv;
 @property (nonatomic, strong) UITextField *tf;
-@property (nonatomic, strong) UILabel *sizeLabel;
+@property (nonatomic, strong) UILabel *hitboxSizeLabel;
+@property (nonatomic, strong) UILabel *chunkSizeLabel;
 @end
 
 @implementation MenuVC
@@ -94,33 +194,49 @@ static void InstallHooks(void) {
     
     // Заголовок
     UILabel *t = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 22)];
-    t.text = @"MCPE Cheats"; t.textColor = [UIColor greenColor];
+    t.text = @"MCPE Cheats v5.0"; t.textColor = [UIColor greenColor];
     t.font = [UIFont boldSystemFontOfSize:16]; t.textAlignment = NSTextAlignmentCenter;
     [self.view addSubview:t]; y += 30;
     
-    // Кнопка Hitboxes
-    UIButton *hb = [UIButton buttonWithType:UIButtonTypeCustom];
-    hb.frame = CGRectMake(12, y, w, 32); hb.tag = 100;
-    hb.backgroundColor = hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor];
-    [hb setTitle:hitboxesEnabled ? @"✓ Hitboxes: ON" : @"✗ Hitboxes: OFF" forState:UIControlStateNormal];
-    [hb setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    hb.titleLabel.font = [UIFont boldSystemFontOfSize:12]; hb.layer.cornerRadius = 5;
-    [hb addTarget:self action:@selector(tgl:) forControlEvents:UIControlEventTouchUpInside];
+    // === HITBOXES ===
+    UIButton *hb = [self btn:CGRectMake(12, y, w, 32) title:hitboxesEnabled ? @"✓ Hitboxes" : @"✗ Hitboxes" 
+                       color:hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor] action:@selector(tglHB:)];
     [self.view addSubview:hb]; y += 36;
     
-    // Слайдер размера
-    self.sizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
-    self.sizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale];
-    self.sizeLabel.textColor = [UIColor whiteColor]; self.sizeLabel.font = [UIFont systemFontOfSize:11];
-    [self.view addSubview:self.sizeLabel]; y += 16;
+    self.hitboxSizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
+    self.hitboxSizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale];
+    self.hitboxSizeLabel.textColor = [UIColor whiteColor]; self.hitboxSizeLabel.font = [UIFont systemFontOfSize:11];
+    [self.view addSubview:self.hitboxSizeLabel]; y += 16;
     
-    UISlider *sl = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
-    sl.minimumValue = 0.5; sl.maximumValue = 5.0; sl.value = hitboxScale;
-    sl.minimumTrackTintColor = [UIColor greenColor];
-    [sl addTarget:self action:@selector(sc:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:sl]; y += 30;
+    UISlider *hs = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
+    hs.minimumValue = 0.5; hs.maximumValue = 5.0; hs.value = hitboxScale;
+    hs.minimumTrackTintColor = [UIColor greenColor];
+    [hs addTarget:self action:@selector(chgHS:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:hs]; y += 30;
     
-    // Поле ввода друга
+    // === PLAYER ESP ===
+    UIButton *pe = [self btn:CGRectMake(12, y, w, 32) title:playerESPEnabled ? @"✓ Player ESP" : @"✗ Player ESP"
+                       color:playerESPEnabled ? [UIColor cyanColor] : [UIColor darkGrayColor] action:@selector(tglPE:)];
+    [self.view addSubview:pe]; y += 36;
+    
+    // === BLOCK ESP ===
+    UIButton *be = [self btn:CGRectMake(12, y, w, 32) title:blockESPEnabled ? @"✓ Block ESP" : @"✗ Block ESP"
+                       color:blockESPEnabled ? [UIColor orangeColor] : [UIColor darkGrayColor] action:@selector(tglBE:)];
+    [self.view addSubview:be]; y += 36;
+    
+    // === CHUNK LOAD ===
+    self.chunkSizeLabel = [[UILabel alloc] initWithFrame:CGRectMake(12, y, w, 16)];
+    self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius];
+    self.chunkSizeLabel.textColor = [UIColor whiteColor]; self.chunkSizeLabel.font = [UIFont systemFontOfSize:11];
+    [self.view addSubview:self.chunkSizeLabel]; y += 16;
+    
+    UISlider *cs = [[UISlider alloc] initWithFrame:CGRectMake(12, y, w, 25)];
+    cs.minimumValue = 2; cs.maximumValue = 16; cs.value = chunkLoadRadius;
+    cs.minimumTrackTintColor = [UIColor purpleColor];
+    [cs addTarget:self action:@selector(chgCL:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:cs]; y += 30;
+    
+    // === ДРУЗЬЯ ===
     self.tf = [[UITextField alloc] initWithFrame:CGRectMake(12, y, w-52, 28)];
     self.tf.placeholder = @"Ник друга"; self.tf.backgroundColor = [UIColor colorWithRed:0.15 green:0.15 blue:0.15 alpha:1];
     self.tf.textColor = [UIColor whiteColor]; self.tf.font = [UIFont systemFontOfSize:13];
@@ -133,41 +249,43 @@ static void InstallHooks(void) {
     add.layer.cornerRadius = 5; [add addTarget:self action:@selector(addF) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:add]; y += 34;
     
-    // Таблица друзей
-    self.tv = [[UITableView alloc] initWithFrame:CGRectMake(12, y, w, 60) style:UITableViewStylePlain];
+    self.tv = [[UITableView alloc] initWithFrame:CGRectMake(12, y, w, 50) style:UITableViewStylePlain];
     self.tv.backgroundColor = [UIColor colorWithRed:0.08 green:0.08 blue:0.08 alpha:0.9];
     self.tv.delegate = self; self.tv.dataSource = self; self.tv.rowHeight = 24;
-    self.tv.layer.cornerRadius = 5;
-    [self.view addSubview:self.tv]; y += 64;
+    [self.view addSubview:self.tv]; y += 55;
     
-    // Кнопка закрыть
+    // === ЗАКРЫТЬ ===
     UIButton *close = [UIButton buttonWithType:UIButtonTypeCustom];
     close.frame = CGRectMake(12, y, w, 30); close.backgroundColor = [UIColor redColor];
-    [close setTitle:@"Закрыть" forState:UIControlStateNormal];
-    [close setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    close.titleLabel.font = [UIFont boldSystemFontOfSize:14]; close.layer.cornerRadius = 6;
-    [close addTarget:self action:@selector(closeM) forControlEvents:UIControlEventTouchUpInside];
+    [close setTitle:@"Закрыть" forState:UIControlStateNormal]; close.titleLabel.font = [UIFont boldSystemFontOfSize:14];
+    close.layer.cornerRadius = 6; [close addTarget:self action:@selector(closeM) forControlEvents:UIControlEventTouchUpInside];
     [self.view addSubview:close];
 }
 
-- (void)tgl:(UIButton *)s {
-    hitboxesEnabled = !hitboxesEnabled;
-    s.backgroundColor = hitboxesEnabled ? [UIColor greenColor] : [UIColor darkGrayColor];
-    [s setTitle:hitboxesEnabled ? @"✓ Hitboxes: ON" : @"✗ Hitboxes: OFF" forState:UIControlStateNormal];
+- (UIButton *)btn:(CGRect)f title:(NSString *)t color:(UIColor *)c action:(SEL)a {
+    UIButton *b = [UIButton buttonWithType:UIButtonTypeCustom];
+    b.frame = f; b.backgroundColor = c; [b setTitle:t forState:UIControlStateNormal];
+    [b setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    b.titleLabel.font = [UIFont boldSystemFontOfSize:12]; b.layer.cornerRadius = 5;
+    [b addTarget:self action:a forControlEvents:UIControlEventTouchUpInside];
+    return b;
 }
-- (void)sc:(UISlider *)s { hitboxScale = s.value; self.sizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale]; }
+
+- (void)tglHB:(UIButton *)s { hitboxesEnabled = !hitboxesEnabled; [self reloadMenu]; }
+- (void)chgHS:(UISlider *)s { hitboxScale = s.value; self.hitboxSizeLabel.text = [NSString stringWithFormat:@"Размер: %.1fx", hitboxScale]; }
+- (void)tglPE:(UIButton *)s { playerESPEnabled = !playerESPEnabled; [self reloadMenu]; }
+- (void)tglBE:(UIButton *)s { blockESPEnabled = !blockESPEnabled; [self reloadMenu]; }
+- (void)chgCL:(UISlider *)s { chunkLoadRadius = (int)s.value; self.chunkSizeLabel.text = [NSString stringWithFormat:@"Чанки: %d", chunkLoadRadius]; }
 - (void)addF { NSString *n = [self.tf.text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]; if (n.length && ![friendsList containsObject:n]) { [friendsList addObject:n]; [self.tv reloadData]; self.tf.text = @""; [self.tf resignFirstResponder]; } }
+- (void)reloadMenu { [self dismissViewControllerAnimated:NO completion:nil]; menuVisible = NO; }
 - (void)closeM { menuVisible = NO; [self dismissViewControllerAnimated:YES completion:nil]; }
 - (BOOL)textFieldShouldReturn:(UITextField *)tf { [self addF]; return YES; }
 - (NSInteger)tableView:(UITableView *)tv numberOfRowsInSection:(NSInteger)s { return friendsList.count; }
 - (UITableViewCell *)tableView:(UITableView *)tv cellForRowAtIndexPath:(NSIndexPath *)ip {
     UITableViewCell *c = [tv dequeueReusableCellWithIdentifier:@"c"];
     if (!c) { c = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"c"]; c.backgroundColor = [UIColor clearColor]; c.textLabel.textColor = [UIColor cyanColor]; c.textLabel.font = [UIFont systemFontOfSize:12]; }
-    if (ip.row < friendsList.count) { id o = friendsList[ip.row]; c.textLabel.text = [o isKindOfClass:[NSString class]] ? o : [NSString stringWithFormat:@"%@", o]; }
+    if (ip.row < friendsList.count) c.textLabel.text = friendsList[ip.row];
     return c;
-}
-- (void)tableView:(UITableView *)tv commitEditingStyle:(UITableViewCellEditingStyle)es forRowAtIndexPath:(NSIndexPath *)ip {
-    if (es == UITableViewCellEditingStyleDelete && ip.row < friendsList.count) { [friendsList removeObjectAtIndex:ip.row]; [tv deleteRowsAtIndexPaths:@[ip] withRowAnimation:UITableViewRowAnimationFade]; }
 }
 @end
 
@@ -185,23 +303,20 @@ static void InstallHooks(void) {
 }
 - (void)tap {
     if (menuVisible) return; menuVisible = YES;
-    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 270, 290);
+    MenuVC *m = [[MenuVC alloc] init]; m.view.frame = CGRectMake(0, 0, 280, 340);
     m.modalPresentationStyle = UIModalPresentationFormSheet;
     UIWindow *w = GetKeyWindow(); if (w && w.rootViewController) [w.rootViewController presentViewController:m animated:YES completion:nil];
 }
 @end
 
-// ========== ЗАПУСК ==========
 static Handler *h = nil;
 __attribute__((constructor)) static void init(void) {
     h = [[Handler alloc] init];
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Установка хуков с задержкой (ждём загрузки игры)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             InstallHooks();
         });
         
-        // Кнопка
         floatingButton = [UIButton buttonWithType:UIButtonTypeCustom];
         floatingButton.frame = CGRectMake(50, 200, 50, 50); floatingButton.layer.cornerRadius = 25;
         floatingButton.clipsToBounds = YES;
