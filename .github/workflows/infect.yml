@@ -1,4 +1,4 @@
-name: Inject Dylib Properly
+name: Inject Dylib Simple
 
 on:
   workflow_dispatch:
@@ -11,56 +11,26 @@ jobs:
     - name: Checkout Code
       uses: actions/checkout@v4
 
-    - name: Install Tools
-      run: |
-        # Скачиваем insert_dylib
-        curl -L -o insert_dylib https://github.com/Tyilo/insert_dylib/releases/download/v1.0/insert_dylib
-        chmod +x insert_dylib
-        cp insert_dylib /usr/local/bin/
-        
-        # Скачиваем optool
-        curl -L -o optool https://github.com/alexzielenski/optool/releases/download/0.1/optool
-        chmod +x optool
-        cp optool /usr/local/bin/
-
     - name: Compile Dylib
       run: |
         clang -dynamiclib -isysroot /Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk -arch arm64 -miphoneos-version-min=14.0 -framework Foundation -framework UIKit -framework CoreGraphics -framework AVFoundation -framework QuartzCore Tweak.mm -o MinecraftCheat.dylib
-        echo "Dylib compiled!"
 
     - name: Download IPA
       run: |
         curl -L -o mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
 
-    - name: Inject Dylib Properly
+    - name: Inject
       run: |
-        # Распаковка
-        unzip -o mcpe.ipa -d extracted
-        cd extracted/Payload/*.app
-        
-        # Копируем dylib
-        cp $GITHUB_WORKSPACE/MinecraftCheat.dylib .
-        
-        # Находим бинарник
-        BINARY=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
-        echo "Binary: $BINARY"
-        
-        # Способ 1: insert_dylib (надёжнее)
-        insert_dylib --strip-codesig --inplace "@executable_path/MinecraftCheat.dylib" "$BINARY" || {
-          echo "insert_dylib failed, trying optool..."
-          # Способ 2: optool
-          optool install -c load -p "@executable_path/MinecraftCheat.dylib" -t "$BINARY"
-        }
-        
-        # Проверяем что dylib добавился
-        echo "=== Checking dylib ==="
-        otool -L "$BINARY" | grep MinecraftCheat || echo "Dylib not found in binary!"
-        
+        unzip mcpe.ipa -d out
+        cp MinecraftCheat.dylib out/Payload/*.app/
+        cd out/Payload/*.app
+        BIN=$(file * | grep "Mach-O" | head -1 | cut -d: -f1)
+        install_name_tool -change @rpath/libc++.1.dylib @executable_path/MinecraftCheat.dylib "$BIN" 2>/dev/null || true
         cd ../../..
-        zip -r $GITHUB_WORKSPACE/MinecraftPatched.ipa Payload/
+        zip -r Patched.ipa Payload/
 
-    - name: Upload Patched IPA
+    - name: Upload
       uses: actions/upload-artifact@v4
       with:
-        name: Minecraft-Patched
-        path: MinecraftPatched.ipa
+        name: Patched-IPA
+        path: Patched.ipa
