@@ -1,0 +1,76 @@
+name: Анализ IPA и сборка дисассемблера
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v4
+
+    - name: Install class-dump
+      run: brew install class-dump
+
+    - name: Скачиваем IPA из релизов
+      run: |
+        # ЗАМЕНИ ЭТУ ССЫЛКУ НА ТВОЮ!
+        wget -O mcpe.ipa "https://github.com/ТВОЙ_ЛОГИН/mcpe-cheat-analyzer/releases/download/v1.0/mcpe.ipa"
+
+    - name: Распаковываем и анализируем IPA
+      run: |
+        echo "=== Начинаем анализ ==="
+        unzip -o mcpe.ipa -d extracted
+        cd extracted/Payload/
+        
+        # Ищем .app папку
+        APP_NAME=$(ls | grep ".app")
+        echo "Найдено приложение: $APP_NAME"
+        
+        cd "$APP_NAME"
+        
+        # Ищем бинарник (самый большой файл без расширения)
+        BINARY=$(find . -type f -perm +111 -name "Minecraft*" | head -1)
+        if [ -z "$BINARY" ]; then
+          BINARY=$(ls -lhS | grep -v ".app\|.plist\|.png\|.storyboardc\|.nib" | head -2 | tail -1 | awk '{print $NF}')
+        fi
+        
+        echo "Анализирую бинарник: $BINARY"
+        
+        # Запускаем class-dump
+        class-dump "$BINARY" -H -o /Users/runner/work/mcpe-cheat-analyzer/mcpe-cheat-analyzer/headers/
+        
+        # Сохраняем текстовый дамп
+        class-dump "$BINARY" > /Users/runner/work/mcpe-cheat-analyzer/mcpe-cheat-analyzer/headers_raw.txt 2>&1
+        
+        echo "=== Анализ завершён ==="
+
+    - name: Показываем важные классы
+      run: |
+        echo "=== Классы Actor/Player ==="
+        grep -r "interface.*Actor\|interface.*Player\|interface.*Level\|interface.*Block" headers/ | head -30
+        
+        echo ""
+        echo "=== Методы getAABB ==="
+        grep -r "getAABB\|getHitbox\|getBoundingBox" headers/ | head -20
+        
+        echo ""
+        echo "=== Методы рендера ==="
+        grep -r "renderEntities\|renderPlayer" headers/ | head -20
+
+    - name: Upload Headers
+      uses: actions/upload-artifact@v4
+      with:
+        name: Minecraft-Headers
+        path: |
+          headers/
+          headers_raw.txt
+
+    - name: Upload IPA Analysis
+      uses: actions/upload-artifact@v4
+      with:
+        name: Analysis-Results
+        path: |
+          headers_raw.txt
