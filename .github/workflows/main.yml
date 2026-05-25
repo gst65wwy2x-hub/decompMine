@@ -24,7 +24,7 @@ jobs:
 
     - name: Download Original IPA
       run: |
-        curl -L -o original.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/ТВОЙ_ФАЙЛ.ipa"
+        curl -L -o original.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa"
 
     - name: Inject Dylib into IPA
       run: |
