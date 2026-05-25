@@ -17,7 +17,7 @@ jobs:
     - name: Скачиваем IPA из релизов
       run: |
         # ЗАМЕНИ ЭТУ ССЫЛКУ НА ТВОЮ!
-        wget -O mcpe.ipa "https://github.com/ТВОЙ_ЛОГИН/mcpe-cheat-analyzer/releases/download/v1.0/mcpe.ipa"
+        wget -O mcpe.ipa "https://github.com/gst65wwy2x-hub/decompMine/releases/download/v1.0/-.1.26.20.ipa
 
     - name: Распаковываем и анализируем IPA
       run: |
